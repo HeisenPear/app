@@ -7,5 +7,5 @@ export type { ParsedExcelResult } from './excel'
 export { parseZip } from './zip'
 export type { ParsedZipResult } from './zip'
 
-export { parsePDF, extractPdfText, detectPdfFormat } from './pdf'
+export { parsePDF, extractPdfText, detectPdfFormat, companyFromFormat } from './pdf'
 export type { ParsedPDFResult, PdfFormat } from './pdf'

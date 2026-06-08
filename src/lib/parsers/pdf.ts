@@ -87,15 +87,39 @@ export async function extractPdfText(buffer: Buffer): Promise<string> {
 
 /**
  * Identify which invoice layout a PDF uses based on its text content.
+ *
+ * The two companies issue structurally different invoices, so the layout
+ * doubles as a reliable company signal:
+ *   - Duhallé Boutique → Oxatis invoices ("Commande #…", "Montant Total TTC").
+ *   - La Jocondienne   → "#FA…" invoices ("Réf. de commande", "Frais de livraison").
  */
 export function detectPdfFormat(text: string): PdfFormat {
+  // Strong, explicit company markers take precedence
+  const isJocondienne =
+    /La Jocondienne/i.test(text) ||
+    /#FA\d+/.test(text) ||
+    /Réf\.?\s*de\s*commande/i.test(text) ||
+    /Frais de livraison/i.test(text)
+
+  const isDuhalle =
+    /duhalle/i.test(text) ||
+    /oxatis/i.test(text) ||
+    (/Commande #\d+/.test(text) && /Montant Total TTC/i.test(text))
+
+  // When both could match, prefer the most specific structural signature
   if (/Commande #\d+/.test(text) && /Montant Total TTC/i.test(text)) {
     return 'duhalle-oxatis'
   }
-  if (/Réf\.?\s*de\s*commande/i.test(text) || /Frais de livraison/i.test(text) || /La Jocondienne/i.test(text)) {
-    return 'jocondienne'
-  }
+  if (isJocondienne) return 'jocondienne'
+  if (isDuhalle) return 'duhalle-oxatis'
   return 'unknown'
+}
+
+/** Map a detected invoice layout to the company that issues it. */
+export function companyFromFormat(format: PdfFormat): Company | undefined {
+  if (format === 'duhalle-oxatis') return 'duhalle'
+  if (format === 'jocondienne') return 'jocondienne'
+  return undefined
 }
 
 function detectTransporterFromText(text: string): Transporter | undefined {
@@ -266,11 +290,16 @@ export async function parsePDF(
     format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
   }
 
+  // The invoice layout reliably identifies the company — trust the PDF content
+  // over the (manual) company hint so the two companies are always separated
+  // correctly, even if a file is uploaded under the wrong company.
+  const resolvedCompany = companyFromFormat(format) ?? company
+
   if (format === 'duhalle-oxatis') {
-    const { orders, errors: parseErrors } = parseDuhalleOxatis(text, company, transporter)
+    const { orders, errors: parseErrors } = parseDuhalleOxatis(text, resolvedCompany, transporter)
     return { orders, disputes: [], errors: [...errors, ...parseErrors], format }
   }
 
-  const { orders, errors: parseErrors } = parseJocondienne(text, company, transporter)
+  const { orders, errors: parseErrors } = parseJocondienne(text, resolvedCompany, transporter)
   return { orders, disputes: [], errors: [...errors, ...parseErrors], format }
 }
