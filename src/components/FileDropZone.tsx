@@ -15,6 +15,7 @@ function getFileIcon(filename: string) {
   const ext = filename.toLowerCase().split('.').pop()
   if (ext === 'csv') return <FileText className="w-4 h-4 text-green-600" />
   if (ext === 'xlsx' || ext === 'xls') return <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+  if (ext === 'pdf') return <FileText className="w-4 h-4 text-red-600" />
   if (ext === 'zip') return <Archive className="w-4 h-4 text-purple-600" />
   return <File className="w-4 h-4 text-gray-600" />
 }

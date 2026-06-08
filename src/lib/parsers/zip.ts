@@ -2,6 +2,7 @@ import JSZip from 'jszip'
 import type { Order, Dispute, Transporter, Company } from '../types'
 import { parseCSV } from './csv'
 import { parseExcel } from './excel'
+import { parsePDF } from './pdf'
 
 export interface ParsedZipResult {
   orders: Order[]
@@ -44,7 +45,15 @@ export async function parseZip(
 
   const zip = await JSZip.loadAsync(buffer)
 
-  const fileEntries = Object.entries(zip.files).filter(([, entry]) => !entry.dir)
+  const fileEntries = Object.entries(zip.files).filter(([name, entry]) => {
+    if (entry.dir) return false
+    const base = name.split('/').pop() || name
+    // Skip macOS resource forks and hidden metadata files
+    if (name.startsWith('__MACOSX/') || base.startsWith('._') || base === '.DS_Store') {
+      return false
+    }
+    return true
+  })
 
   for (const [filename, entry] of fileEntries) {
     const fileType = detectFileType(filename)
@@ -76,9 +85,17 @@ export async function parseZip(
         }
         processedFiles.push(filename)
       } else if (fileType === 'pdf') {
-        errors.push(`[${filename}]: PDF parsing not supported in batch processing`)
+        const arrayBuffer = await entry.async('arraybuffer')
+        const pdfBuffer = Buffer.from(arrayBuffer)
+        const result = await parsePDF(pdfBuffer, company, transporter)
+        allOrders.push(...result.orders)
+        allDisputes.push(...result.disputes)
+        if (result.errors.length > 0) {
+          errors.push(`[${filename}]: ${result.errors.join(', ')}`)
+        }
+        processedFiles.push(filename)
       } else {
-        // Skip unknown files
+        // Skip unknown files (e.g. __MACOSX, .DS_Store, images)
       }
     } catch (err) {
       errors.push(

@@ -53,6 +53,35 @@ export interface ProcessedData {
   processedAt: string
 }
 
+/** A persisted source file kept alongside a processing batch. */
+export interface StoredSource {
+  name: string
+  size: number
+  type: string
+  /** Internal blob pathname (not exposed to the client). */
+  pathname: string
+}
+
+/** A full persisted processing run: raw files + computed report. */
+export interface BatchRecord {
+  id: string
+  label: string
+  createdAt: string
+  sources: StoredSource[]
+  data: ProcessedData
+}
+
+/** Lightweight batch description used for the history list. */
+export interface BatchSummary {
+  id: string
+  label: string
+  createdAt: string
+  companies: Company[]
+  totalOrders: number
+  totalDisputes: number
+  fileCount: number
+}
+
 export interface UploadedFile {
   id: string
   file: File

@@ -2,10 +2,17 @@ import { NextRequest, NextResponse } from 'next/server'
 import { parseCSV } from '@/lib/parsers/csv'
 import { parseExcel } from '@/lib/parsers/excel'
 import { parseZip } from '@/lib/parsers/zip'
+import { parsePDF } from '@/lib/parsers/pdf'
 import { calculateStats } from '@/lib/processors/stats'
 import { processOrders } from '@/lib/processors/orders'
 import { processDisputes } from '@/lib/processors/disputes'
-import type { Order, Dispute, Company, Transporter, FileType, ProcessedData, CompanyReport } from '@/lib/types'
+import { saveBatch, isStorageConfigured } from '@/lib/storage/blob'
+import { COMPANY_LABELS } from '@/lib/types'
+import type { Order, Dispute, Company, Transporter, FileType, ProcessedData, CompanyReport, BatchSummary } from '@/lib/types'
+
+// PDF/Excel parsing relies on Node.js APIs — force the Node runtime, not Edge.
+export const runtime = 'nodejs'
+export const maxDuration = 60
 
 function detectFileExtension(filename: string): 'csv' | 'xlsx' | 'xls' | 'pdf' | 'zip' | 'unknown' {
   const ext = filename.toLowerCase().split('.').pop() || ''
@@ -29,6 +36,7 @@ export async function POST(request: NextRequest) {
     const allOrders: Order[] = []
     const allDisputes: Dispute[] = []
     const errors: string[] = []
+    const rawSources: Array<{ name: string; type: string; buffer: Buffer }> = []
 
     for (const file of files) {
       const company = (formData.get(`company_${file.name}`) as Company) || 'duhalle'
@@ -38,6 +46,7 @@ export async function POST(request: NextRequest) {
       const ext = detectFileExtension(file.name)
       const arrayBuffer = await file.arrayBuffer()
       const buffer = Buffer.from(arrayBuffer)
+      rawSources.push({ name: file.name, type: file.type || 'application/octet-stream', buffer })
 
       try {
         if (ext === 'csv') {
@@ -56,7 +65,10 @@ export async function POST(request: NextRequest) {
           allDisputes.push(...result.disputes)
           errors.push(...result.errors)
         } else if (ext === 'pdf') {
-          errors.push(`${file.name}: PDF parsing not yet implemented`)
+          const result = await parsePDF(buffer, company, transporter || undefined)
+          allOrders.push(...result.orders)
+          allDisputes.push(...result.disputes)
+          errors.push(...result.errors)
         } else {
           errors.push(`${file.name}: Unknown file format`)
         }
@@ -105,7 +117,32 @@ export async function POST(request: NextRequest) {
       processedAt: new Date().toISOString(),
     }
 
-    return NextResponse.json(processedData)
+    // Optionally persist this run (raw files + report) to shared storage
+    const persist = formData.get('persist') === 'true'
+    let savedBatch: BatchSummary | null = null
+    let persistError: string | undefined
+    if (persist) {
+      if (!isStorageConfigured()) {
+        persistError =
+          "Stockage partagé non configuré : créez un store Vercel Blob (variable BLOB_READ_WRITE_TOKEN) pour activer l'historique."
+      } else {
+        try {
+          const label =
+            (formData.get('label') as string | null)?.trim() ||
+            defaultLabel(reports)
+          savedBatch = await saveBatch({ label, data: processedData, sources: rawSources })
+        } catch (err) {
+          persistError = err instanceof Error ? err.message : 'Échec de la sauvegarde'
+        }
+      }
+    }
+
+    return NextResponse.json({
+      ...processedData,
+      errors,
+      batch: savedBatch,
+      persistError,
+    })
   } catch (err) {
     console.error('Process error:', err)
     return NextResponse.json(
@@ -123,4 +160,16 @@ function resolvePeriod(orders: Order[]): string {
   const last = dates[dates.length - 1]
   if (first === last) return first
   return `${first} — ${last}`
+}
+
+/** Build a human-friendly default label from the processed reports. */
+function defaultLabel(reports: CompanyReport[]): string {
+  const companies = Array.from(new Set(reports.map((r) => COMPANY_LABELS[r.company])))
+  const stamp = new Date().toLocaleDateString('fr-FR', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  })
+  const who = companies.length > 0 ? companies.join(' + ') : 'Import'
+  return `${who} — ${stamp}`
 }
