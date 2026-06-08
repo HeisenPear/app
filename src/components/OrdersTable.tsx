@@ -42,7 +42,7 @@ export default function OrdersTable({ orders, pageSize = 50 }: OrdersTableProps)
           value={search}
           onChange={e => { setSearch(e.target.value); setPage(1) }}
           placeholder="Rechercher par N° commande ou mode de livraison..."
-          className="w-full max-w-sm text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-700 focus:border-transparent"
+          className="w-full max-w-sm text-sm text-gray-900 placeholder:text-gray-400 bg-white border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-700 focus:border-transparent"
         />
         {search && (
           <div className="text-xs text-gray-500 mt-1.5">
