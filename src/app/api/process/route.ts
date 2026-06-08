@@ -2,10 +2,15 @@ import { NextRequest, NextResponse } from 'next/server'
 import { parseCSV } from '@/lib/parsers/csv'
 import { parseExcel } from '@/lib/parsers/excel'
 import { parseZip } from '@/lib/parsers/zip'
+import { parsePDF } from '@/lib/parsers/pdf'
 import { calculateStats } from '@/lib/processors/stats'
 import { processOrders } from '@/lib/processors/orders'
 import { processDisputes } from '@/lib/processors/disputes'
 import type { Order, Dispute, Company, Transporter, FileType, ProcessedData, CompanyReport } from '@/lib/types'
+
+// PDF/Excel parsing relies on Node.js APIs — force the Node runtime, not Edge.
+export const runtime = 'nodejs'
+export const maxDuration = 60
 
 function detectFileExtension(filename: string): 'csv' | 'xlsx' | 'xls' | 'pdf' | 'zip' | 'unknown' {
   const ext = filename.toLowerCase().split('.').pop() || ''
@@ -56,7 +61,10 @@ export async function POST(request: NextRequest) {
           allDisputes.push(...result.disputes)
           errors.push(...result.errors)
         } else if (ext === 'pdf') {
-          errors.push(`${file.name}: PDF parsing not yet implemented`)
+          const result = await parsePDF(buffer, company, transporter || undefined)
+          allOrders.push(...result.orders)
+          allDisputes.push(...result.disputes)
+          errors.push(...result.errors)
         } else {
           errors.push(`${file.name}: Unknown file format`)
         }

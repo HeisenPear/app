@@ -3,6 +3,25 @@ import type { ProcessedData, CompanyReport, Order } from '../types'
 import { COMPANY_LABELS, TRANSPORTER_LABELS } from '../types'
 import { EXCEL_COLORS, EXCEL_FONTS, EXCEL_ROW_HEIGHTS, SHIPPING_RATES, RATE_LABELS, RATE_STATUS } from '../constants'
 
+const FR_MONTH_NAMES = [
+  'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+  'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+]
+
+/**
+ * Render an ISO date (YYYY-MM-DD) as a French long date ("31 mai 2026"),
+ * matching the original report format. Falls back to the raw value otherwise.
+ */
+function formatFrenchDate(date: string): string {
+  if (!date) return ''
+  const m = date.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return date
+  const day = parseInt(m[3], 10)
+  const month = FR_MONTH_NAMES[parseInt(m[2], 10) - 1]
+  if (!month) return date
+  return `${day} ${month} ${m[1]}`
+}
+
 type RGB = { argb: string }
 
 function hex(color: string): RGB {
@@ -375,18 +394,9 @@ function buildDetailSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: 
         ? EXCEL_COLORS.lightGrey
         : EXCEL_COLORS.white
 
-    const formatDate = (date: string) => {
-      if (!date) return ''
-      const parts = date.split('-')
-      if (parts.length === 3) {
-        return `${parts[2]}/${parts[1]}/${parts[0]}`
-      }
-      return date
-    }
-
     const cells = [
       { col: 1, value: order.id },
-      { col: 2, value: formatDate(order.date) },
+      { col: 2, value: formatFrenchDate(order.date) },
       { col: 3, value: order.deliveryMode },
       { col: 4, value: order.totalTTC, numFmt: '#,##0.00 €' },
       { col: 5, value: order.shippingCost, numFmt: '#,##0.00 €' },
@@ -490,16 +500,9 @@ function buildByRateSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: 
 
       const bgColor = idx % 2 === 0 ? EXCEL_COLORS.white : EXCEL_COLORS.lightGrey
 
-      const formatDate = (date: string) => {
-        if (!date) return ''
-        const parts = date.split('-')
-        if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`
-        return date
-      }
-
       ;[
         { col: 1, value: order.id },
-        { col: 2, value: formatDate(order.date) },
+        { col: 2, value: formatFrenchDate(order.date) },
         { col: 3, value: order.deliveryMode },
         { col: 4, value: order.totalTTC, numFmt: '#,##0.00 €' },
         { col: 5, value: order.shippingCost, numFmt: '#,##0.00 €' },
