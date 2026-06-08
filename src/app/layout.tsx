@@ -1,37 +1,25 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
-import { Providers } from "./providers";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import type { Metadata } from 'next'
+import './globals.css'
+import Navigation from '@/components/Navigation'
 
 export const metadata: Metadata = {
-  title: "CoupleExchange - Partagez vos expériences",
-  description: "Plateforme d'échange entre couples pour partager lieux, hôtels, objets et expériences",
-};
+  title: 'Analyseur Frais de Port',
+  description: 'Analyse des frais de port et litiges pour Duhallé Boutique et La Jocondienne',
+}
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: {
+  children: React.ReactNode
+}) {
   return (
     <html lang="fr">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        <Providers>
+      <body className="min-h-screen bg-gray-50">
+        <Navigation />
+        <main className="pt-16">
           {children}
-        </Providers>
+        </main>
       </body>
     </html>
-  );
+  )
 }
