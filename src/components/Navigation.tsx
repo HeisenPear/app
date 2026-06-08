@@ -1,8 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { Package, Upload, FileText, AlertTriangle, BarChart2, History } from 'lucide-react'
+import { usePathname, useRouter } from 'next/navigation'
+import { Package, Upload, FileText, AlertTriangle, BarChart2, History, LogOut } from 'lucide-react'
 import { useAppStore } from '@/store'
 import { cn } from '@/lib/utils'
 
@@ -16,9 +16,19 @@ const navItems = [
 
 export default function Navigation() {
   const pathname = usePathname()
+  const router = useRouter()
   const { processedData } = useAppStore()
 
+  // The login page is shown without the app chrome
+  if (pathname === '/login') return null
+
   const disputeCount = processedData?.reports.reduce((sum, r) => sum + r.disputes.length, 0) || 0
+
+  const handleLogout = async () => {
+    await fetch('/api/logout', { method: 'POST' })
+    router.push('/login')
+    router.refresh()
+  }
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-white border-b border-gray-200 shadow-sm">
@@ -67,13 +77,23 @@ export default function Navigation() {
             })}
           </nav>
 
-          {/* Status indicator */}
-          {processedData && (
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border" style={{ borderColor: '#D4E8D6', backgroundColor: '#F0F8F1', color: '#15431F' }}>
-              <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-              {processedData.globalStats.totalOrders} commandes
-            </div>
-          )}
+          {/* Right side: status + logout */}
+          <div className="flex items-center gap-2">
+            {processedData && (
+              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border" style={{ borderColor: '#D4E8D6', backgroundColor: '#F0F8F1', color: '#15431F' }}>
+                <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                {processedData.globalStats.totalOrders} commandes
+              </div>
+            )}
+            <button
+              onClick={handleLogout}
+              title="Se déconnecter"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+              <span className="hidden sm:block">Déconnexion</span>
+            </button>
+          </div>
         </div>
       </div>
     </header>
