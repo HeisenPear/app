@@ -13,11 +13,17 @@ export default function UploadPage() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [processError, setProcessError] = useState<string | null>(null)
   const [processSuccess, setProcessSuccess] = useState(false)
+  const [persist, setPersist] = useState(true)
+  const [label, setLabel] = useState('')
+  const [savedLabel, setSavedLabel] = useState<string | null>(null)
+  const [persistWarning, setPersistWarning] = useState<string | null>(null)
 
   const handleFilesChange = (files: UploadedFile[]) => {
     setUploadedFiles(files)
     setProcessSuccess(false)
     setProcessError(null)
+    setSavedLabel(null)
+    setPersistWarning(null)
   }
 
   const handleProcess = async () => {
@@ -26,6 +32,8 @@ export default function UploadPage() {
     setIsProcessing(true)
     setProcessError(null)
     setProcessSuccess(false)
+    setSavedLabel(null)
+    setPersistWarning(null)
 
     try {
       const formData = new FormData()
@@ -36,6 +44,10 @@ export default function UploadPage() {
         if (uf.transporter) {
           formData.append(`transporter_${uf.file.name}`, uf.transporter)
         }
+      }
+      if (persist) {
+        formData.append('persist', 'true')
+        if (label.trim()) formData.append('label', label.trim())
       }
 
       const response = await fetch('/api/process', {
@@ -53,8 +65,16 @@ export default function UploadPage() {
         throw new Error(serverError || `Erreur lors du traitement (HTTP ${response.status})`)
       }
 
-      setProcessedData(data as typeof processedData)
+      const result = data as typeof processedData & {
+        batch?: { label: string } | null
+        persistError?: string
+      }
+      setProcessedData(result)
       setProcessSuccess(true)
+      if (persist) {
+        if (result?.batch) setSavedLabel(result.batch.label)
+        else if (result?.persistError) setPersistWarning(result.persistError)
+      }
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : 'Erreur inconnue')
     } finally {
@@ -128,6 +148,35 @@ export default function UploadPage() {
         <FileDropZone files={uploadedFiles} onFilesChange={handleFilesChange} />
       </div>
 
+      {/* Save options */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={persist}
+            onChange={(e) => setPersist(e.target.checked)}
+            className="w-4 h-4 rounded border-gray-300 text-green-700 focus:ring-green-700"
+          />
+          <span className="text-sm font-medium text-gray-900">
+            Enregistrer dans l’historique partagé (fichiers + rapport)
+          </span>
+        </label>
+        {persist && (
+          <div className="mt-3">
+            <label className="block text-xs font-medium text-gray-500 mb-1">
+              Nom du lot (optionnel)
+            </label>
+            <input
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Ex : Colissimo — mai 2026"
+              className="w-full max-w-sm text-sm text-gray-900 placeholder:text-gray-400 bg-white border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-700 focus:border-transparent"
+            />
+          </div>
+        )}
+      </div>
+
       {/* Status messages */}
       {processError && (
         <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-lg mb-6">
@@ -148,7 +197,22 @@ export default function UploadPage() {
               {processedData?.reports.reduce((sum, r) => sum + r.orders.length, 0)} commandes traitées.
               Vous pouvez maintenant exporter le rapport Excel ou consulter le tableau de bord.
             </div>
+            {savedLabel && (
+              <div className="text-sm text-green-700 mt-1">
+                Enregistré dans l’historique sous «&nbsp;{savedLabel}&nbsp;».{' '}
+                <button onClick={() => router.push('/historique')} className="underline font-medium">
+                  Voir l’historique
+                </button>
+              </div>
+            )}
           </div>
+        </div>
+      )}
+
+      {persistWarning && (
+        <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg mb-6">
+          <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-800">{persistWarning}</div>
         </div>
       )}
 

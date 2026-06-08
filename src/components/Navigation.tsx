@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Package, Upload, FileText, AlertTriangle, BarChart2 } from 'lucide-react'
+import { Package, Upload, FileText, AlertTriangle, BarChart2, History } from 'lucide-react'
 import { useAppStore } from '@/store'
 import { cn } from '@/lib/utils'
 
@@ -11,6 +11,7 @@ const navItems = [
   { href: '/upload', label: 'Importer', icon: Upload },
   { href: '/rapports', label: 'Rapports', icon: FileText },
   { href: '/litiges', label: 'Litiges', icon: AlertTriangle },
+  { href: '/historique', label: 'Historique', icon: History },
 ]
 
 export default function Navigation() {
