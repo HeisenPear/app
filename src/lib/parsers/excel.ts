@@ -40,7 +40,7 @@ function cellNumber(cell: ExcelJS.Cell): number {
 }
 
 export async function parseExcel(
-  buffer: Buffer,
+  buffer: Buffer | ArrayBuffer,
   company: Company,
   transporter?: Transporter,
   fileType: 'commandes' | 'litiges' = 'commandes'
@@ -50,7 +50,8 @@ export async function parseExcel(
   const disputes: Dispute[] = []
 
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(buffer)
+  const ab = buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+  await workbook.xlsx.load(ab as ArrayBuffer)
 
   const sheet = workbook.worksheets[0]
   if (!sheet) {
