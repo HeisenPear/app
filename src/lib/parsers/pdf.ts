@@ -155,9 +155,13 @@ export function parseDuhalleOxatis(
 
       // The delivery mode sits between "Mode de livraison" and "Mode de paiement"
       const modeMatch = block.match(/Mode de livraison\s+(.+?)\s+Mode de paiement/)
-      const deliveryMode = modeMatch
+      const deliveryMode = (modeMatch
         ? modeMatch[1].trim()
         : 'Colissimo Flexibilité domicile - Livraison à Domicile - France métropolitaine'
+      )
+        // Drop the "Frais de port offerts" suffix that can trail the mode
+        .replace(/\s*Frais de port offerts\s*$/i, '')
+        .trim()
 
       const totalMatch = block.match(/Montant Total TTC\s*([0-9][0-9\s.,]*)\s*€/)
       const totalTTC = totalMatch ? parseFrAmount(totalMatch[1]) : 0
@@ -178,11 +182,16 @@ export function parseDuhalleOxatis(
         }
       }
 
+      // The carrier is identified by the delivery mode wording (the content is
+      // the source of truth); fall back to the caller hint, then Colissimo.
+      const orderTransporter =
+        detectTransporterFromText(deliveryMode) || transporter || 'colissimo'
+
       orders.push({
         id: id.trim(),
         date,
         company,
-        transporter: transporter || 'colissimo',
+        transporter: orderTransporter,
         totalTTC,
         shippingCost,
         deliveryMode,
