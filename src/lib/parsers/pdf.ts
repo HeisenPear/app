@@ -1,4 +1,4 @@
-import { PDFParse } from 'pdf-parse'
+import { extractText, getDocumentProxy } from 'unpdf'
 import type { Order, Dispute, Transporter, Company } from '../types'
 
 export interface ParsedPDFResult {
@@ -70,16 +70,19 @@ export function ddmmyyyyToISO(input: string | null | undefined): string {
 }
 
 /**
- * Extract concatenated plain text from a PDF buffer using pdfjs (via pdf-parse).
+ * Extract concatenated plain text from a PDF buffer.
+ *
+ * Uses `unpdf`, which ships a serverless-compatible build of pdf.js. Unlike the
+ * default pdf.js distribution it does not rely on browser globals such as
+ * `DOMMatrix`, so it runs reliably inside Vercel's Node.js serverless functions.
+ * The returned text merges all pages and joins text items with spaces (no
+ * guaranteed newlines), so the invoice parsers below must not depend on line
+ * breaks.
  */
 export async function extractPdfText(buffer: Buffer): Promise<string> {
-  const parser = new PDFParse({ data: new Uint8Array(buffer) })
-  try {
-    const result = await parser.getText()
-    return result.text || ''
-  } finally {
-    await parser.destroy()
-  }
+  const pdf = await getDocumentProxy(new Uint8Array(buffer))
+  const { text } = await extractText(pdf, { mergePages: true })
+  return text || ''
 }
 
 /**
@@ -123,10 +126,11 @@ export function parseDuhalleOxatis(
       if (!idMatch) return
       const id = idMatch[1]
 
-      const dateMatch = block.match(/^\d+\s*\t?\s*(\d{1,2}\s+[A-Za-zÀ-ÿ]+\s+\d{4})/)
+      const dateMatch = block.match(/^\d+\s+(\d{1,2}\s+[A-Za-zÀ-ÿ]+\s+\d{4})/)
       const date = dateMatch ? frenchDateToISO(dateMatch[1]) : ''
 
-      const modeMatch = block.match(/Mode de livraison\s*[\r\n]+([^\r\n]+)/)
+      // The delivery mode sits between "Mode de livraison" and "Mode de paiement"
+      const modeMatch = block.match(/Mode de livraison\s+(.+?)\s+Mode de paiement/)
       const deliveryMode = modeMatch
         ? modeMatch[1].trim()
         : 'Colissimo Flexibilité domicile - Livraison à Domicile - France métropolitaine'
@@ -201,7 +205,7 @@ export function parseJocondienne(
         ? parseFrAmount(totalMatches[totalMatches.length - 1][1])
         : 0
 
-      const modeMatch = block.match(/Transporteur\s+([^\r\n]+)/i)
+      const modeMatch = block.match(/Transporteur\s+(.+?)(?:\s+Powered by|\s+La Jocondienne|$)/i)
       const deliveryMode = modeMatch ? modeMatch[1].trim() : 'Livraison à domicile'
 
       const blockTransporter = transporter || detectTransporterFromText(block) || 'dpd'

@@ -43,13 +43,17 @@ export default function UploadPage() {
         body: formData,
       })
 
+      const data = await readJsonResponse(response)
+
       if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.error || 'Erreur lors du traitement')
+        const serverError =
+          data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
+            ? (data as { error: string }).error
+            : ''
+        throw new Error(serverError || `Erreur lors du traitement (HTTP ${response.status})`)
       }
 
-      const data = await response.json()
-      setProcessedData(data)
+      setProcessedData(data as typeof processedData)
       setProcessSuccess(true)
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : 'Erreur inconnue')
@@ -86,6 +90,25 @@ export default function UploadPage() {
       setProcessError(err instanceof Error ? err.message : 'Erreur export')
     } finally {
       setIsExporting(false)
+    }
+  }
+
+  /**
+   * Safely parse a fetch Response that is expected to be JSON. Serverless
+   * platforms (e.g. Vercel) return HTML error pages on crashes/timeouts/limits,
+   * which would otherwise throw an opaque "Unexpected token '<'" error.
+   */
+  async function readJsonResponse(response: Response): Promise<unknown> {
+    const text = await response.text()
+    try {
+      return JSON.parse(text)
+    } catch {
+      const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+      return {
+        error: snippet
+          ? `Réponse inattendue du serveur : ${snippet}`
+          : `Le serveur a renvoyé une réponse vide (HTTP ${response.status}).`,
+      }
     }
   }
 

@@ -12,9 +12,9 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
-  // Keep heavy native/Node-only parsing libs out of the bundler so they load
+  // Keep heavy Node-only parsing libs out of the bundler so they load
   // correctly at runtime in the Node.js serverless functions.
-  serverExternalPackages: ['pdf-parse', 'exceljs'],
+  serverExternalPackages: ['exceljs'],
 }
 
 export default nextConfig
