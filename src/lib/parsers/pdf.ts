@@ -37,6 +37,13 @@ export function parseFrAmount(input: string | null | undefined): number {
   const match = String(input).match(/-?[0-9][0-9\s.,]*/)
   if (!match) return 0
   const cleaned = match[0]
+    // PDF text extraction sometimes drops the decimal comma, leaving a bare
+    // space instead: "6,90" → "6 90", "9,27" → "9 27".
+    // A space followed by exactly 2 digits (not part of a 3-digit group) is
+    // treated as a lost decimal separator: "6 90" → "6.90", "9 27" → "9.27".
+    .replace(/(\d) (\d{2})(?!\d)/g, '$1.$2')
+    // A space followed by 3 digits is a real thousands separator: "1 276" → "1276"
+    .replace(/(\d) (\d{3})/g, '$1$2')
     .replace(/\s/g, '')
     // Drop dot thousands separators (e.g. "1.276,50"), keep comma decimal
     .replace(/\.(?=\d{3}\b)/g, '')
