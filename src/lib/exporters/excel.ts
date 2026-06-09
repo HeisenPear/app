@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs'
 import type { ProcessedData, CompanyReport, Order } from '../types'
 import { COMPANY_LABELS, TRANSPORTER_LABELS } from '../types'
-import { EXCEL_COLORS, EXCEL_FONTS, EXCEL_ROW_HEIGHTS, SHIPPING_RATES, RATE_LABELS, RATE_STATUS } from '../constants'
+import { EXCEL_COLORS, EXCEL_FONTS, EXCEL_ROW_HEIGHTS } from '../constants'
 
 const FR_MONTH_NAMES = [
   'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
@@ -26,6 +26,10 @@ type RGB = { argb: string }
 
 function hex(color: string): RGB {
   return { argb: 'FF' + color.replace('#', '') }
+}
+
+function formatRate(rate: number): string {
+  return rate.toFixed(2).replace('.', ',') + ' €'
 }
 
 function border(style: ExcelJS.BorderStyle = 'thin'): Partial<ExcelJS.Borders> {
@@ -183,40 +187,36 @@ function buildRecapSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: R
     cell.border = border()
   })
 
-  // Rows 11-15 — Rate tiers
+  // Dynamic rate tiers from actual data
   const rateDataStartRow = 11
-  SHIPPING_RATES.forEach((rate, idx) => {
+  const totalCountRef = stats.distribution.reduce((s, d) => s + d.count, 0) || 1
+
+  stats.distribution.forEach((entry, idx) => {
     const rowNum = rateDataStartRow + idx
-    const entry = stats.distribution.find(d => d.rate === rate) || { rate, count: 0, subtotal: 0, percentage: 0 }
     const row = ws.getRow(rowNum)
     row.height = 21
 
-    const isFree = rate === 0
-    const isLast = idx === SHIPPING_RATES.length - 1
-
+    const isFree = entry.rate === 0
     const bgColor = isFree
       ? EXCEL_COLORS.freeShippingBg
-      : isLast
-        ? EXCEL_COLORS.yellow
-        : idx % 2 === 0
-          ? EXCEL_COLORS.white
-          : EXCEL_COLORS.lightGrey
+      : idx % 2 === 0
+        ? EXCEL_COLORS.white
+        : EXCEL_COLORS.lightGrey
 
     const textColor = isFree ? EXCEL_COLORS.freeShippingBlue : EXCEL_COLORS.darkGrey
     const bold = isFree
 
-    const totalCount = stats.distribution.reduce((s, d) => s + d.count, 0)
-    const totalCountRef = totalCount || 1
+    const totalRowRef = rateDataStartRow + stats.distribution.length
 
     const cells = [
-      { col: 1, value: RATE_LABELS[rate] || `${rate} €` },
+      { col: 1, value: formatRate(entry.rate) },
       { col: 2, value: entry.count },
       {
         col: 3,
-        value: { formula: `B${rowNum}/B${rateDataStartRow + SHIPPING_RATES.length}`, result: entry.count / totalCountRef },
+        value: { formula: `B${rowNum}/B${totalRowRef}`, result: entry.count / totalCountRef },
         numFmt: '0.0%',
       },
-      { col: 4, value: RATE_STATUS[rate] || '🔵 Payants' },
+      { col: 4, value: isFree ? '🟢 OFFERTS' : '🔵 Payants' },
     ]
 
     cells.forEach(({ col, value, numFmt }) => {
@@ -229,13 +229,12 @@ function buildRecapSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: R
       if (numFmt) cell.numFmt = numFmt
     })
 
-    // Rate label left-aligned
     ws.getCell(rowNum, 1).alignment = { horizontal: 'left', vertical: 'middle', indent: 1 }
     ws.getCell(rowNum, 4).alignment = { horizontal: 'left', vertical: 'middle', indent: 1 }
   })
 
-  // Row 16 — TOTAL
-  const totalRow1Num = rateDataStartRow + SHIPPING_RATES.length
+  // TOTAL row
+  const totalRow1Num = rateDataStartRow + stats.distribution.length
   const totalRow1 = ws.getRow(totalRow1Num)
   totalRow1.height = EXCEL_ROW_HEIGHTS.colHeader
   const totalCount1 = stats.distribution.reduce((s, d) => s + d.count, 0)
@@ -284,29 +283,25 @@ function buildRecapSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: R
     cell.border = border()
   })
 
-  // Rows 20-24 — Cost data rows
+  // Dynamic cost data rows
   const costDataStartRow = colHeader2Row + 1
-  SHIPPING_RATES.forEach((rate, idx) => {
+  stats.distribution.forEach((entry, idx) => {
     const rowNum = costDataStartRow + idx
-    const entry = stats.distribution.find(d => d.rate === rate) || { rate, count: 0, subtotal: 0, percentage: 0 }
     const row = ws.getRow(rowNum)
     row.height = 21
 
-    const isFree = rate === 0
-    const isLast = idx === SHIPPING_RATES.length - 1
+    const isFree = entry.rate === 0
     const bgColor = isFree
       ? EXCEL_COLORS.freeShippingBg
-      : isLast
-        ? EXCEL_COLORS.yellow
-        : idx % 2 === 0
-          ? EXCEL_COLORS.white
-          : EXCEL_COLORS.lightGrey
+      : idx % 2 === 0
+        ? EXCEL_COLORS.white
+        : EXCEL_COLORS.lightGrey
     const textColor = isFree ? EXCEL_COLORS.freeShippingBlue : EXCEL_COLORS.darkGrey
 
     const avgCost = entry.count > 0 ? entry.subtotal / entry.count : 0
 
     ;[
-      { col: 1, value: RATE_LABELS[rate] || `${rate} €` },
+      { col: 1, value: formatRate(entry.rate) },
       { col: 2, value: entry.count },
       { col: 3, value: entry.subtotal, numFmt: '#,##0.00 €' },
       { col: 4, value: avgCost, numFmt: '#,##0.00 €' },
@@ -322,8 +317,8 @@ function buildRecapSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: R
     ws.getCell(rowNum, 1).alignment = { horizontal: 'left', vertical: 'middle', indent: 1 }
   })
 
-  // Row 25 — TOTAL cost
-  const totalRow2Num = costDataStartRow + SHIPPING_RATES.length
+  // TOTAL cost row
+  const totalRow2Num = costDataStartRow + stats.distribution.length
   const totalRow2 = ws.getRow(totalRow2Num)
   totalRow2.height = EXCEL_ROW_HEIGHTS.colHeader
   ;[
@@ -450,12 +445,14 @@ function buildByRateSheet(ws: ExcelJS.Worksheet, report: CompanyReport, colors: 
 
   let currentRow = 3
 
-  for (const rate of SHIPPING_RATES) {
+  const rates = report.stats.distribution.map(d => d.rate)
+
+  for (const rate of rates) {
     const rateOrders = report.orders.filter(o => Math.abs(o.shippingCost - rate) < 0.01)
     if (rateOrders.length === 0) continue
 
     const isFree = rate === 0
-    const rateLabel = RATE_LABELS[rate] || `${rate} €`
+    const rateLabel = formatRate(rate)
 
     // Banner row
     ws.mergeCells(`A${currentRow}:E${currentRow}`)
