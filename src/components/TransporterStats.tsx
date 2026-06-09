@@ -154,6 +154,8 @@ function getTransporterColors(transporter: string) {
       return { primary: '#7B1A1A', secondary: '#8B2020', accent: '#F5D5D5' }
     case 'geodis':
       return { primary: '#0D3B6E', secondary: '#0D47A1', accent: '#DAEAF8' }
+    case 'retrait':
+      return { primary: '#7A4A12', secondary: '#8A5616', accent: '#F5E6D5' }
     default:
       return { primary: '#15431F', secondary: '#1F4A26', accent: '#D4E8D6' }
   }

@@ -1,4 +1,4 @@
-export type Transporter = 'colissimo' | 'dpd' | 'geodis'
+export type Transporter = 'colissimo' | 'dpd' | 'geodis' | 'retrait'
 export type Company = 'duhalle' | 'jocondienne'
 export type FileType = 'commandes' | 'litiges'
 
@@ -108,6 +108,7 @@ export const TRANSPORTER_LABELS: Record<Transporter, string> = {
   colissimo: 'Colissimo',
   dpd: 'DPD',
   geodis: 'GEODIS',
+  retrait: 'Retrait magasin',
 }
 
 export const TRANSPORTER_COLORS: Record<
@@ -128,6 +129,11 @@ export const TRANSPORTER_COLORS: Record<
     primary: '#0D3B6E',
     secondary: '#0D47A1',
     accent: '#DAEAF8',
+  },
+  retrait: {
+    primary: '#7A4A12',
+    secondary: '#8A5616',
+    accent: '#F5E6D5',
   },
 }
 

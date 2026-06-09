@@ -165,6 +165,7 @@ export default function FileDropZone({ files, onFilesChange }: FileDropZoneProps
                   <option value="colissimo">{TRANSPORTER_LABELS.colissimo}</option>
                   <option value="dpd">{TRANSPORTER_LABELS.dpd}</option>
                   <option value="geodis">{TRANSPORTER_LABELS.geodis}</option>
+                  <option value="retrait">{TRANSPORTER_LABELS.retrait}</option>
                 </select>
               </div>
 

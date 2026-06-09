@@ -105,13 +105,19 @@ export function detectPdfFormat(text: string): PdfFormat {
 
   // PrestaShop order-detail page (text is rasterized as vectors → reached via
   // OCR). Distinctive: an order number plus shipping/carrier tables, but NOT
-  // the Oxatis "Montant Total TTC" wording.
+  // the Oxatis "Montant Total TTC" wording. Markers are kept broad (and tolerant
+  // of OCR noise) so an order is never misrouted to another parser and silently
+  // dropped.
   const prestashopMarkers =
-    /Frais d['’]exp[ée]dition/i.test(text) ||
+    /Frais d['’]exp[ée]di/i.test(text) ||
     /Total frais de port/i.test(text) ||
     /Bon de livraison/i.test(text) ||
-    /Transporteurs?\s*\(\s*\d/i.test(text) ||
-    /point\s+retrait/i.test(text)
+    /Transporteurs?\s*\(/i.test(text) ||
+    /Transporteur GLS/i.test(text) ||
+    /Num[ée]ro de suivi/i.test(text) ||
+    /Points? de retrait/i.test(text) ||
+    /relais\s*pickup/i.test(text) ||
+    /click\s*&?\s*collect/i.test(text)
   if (hasCommande && prestashopMarkers && !/Montant Total TTC/i.test(text)) {
     return 'prestashop-order'
   }
@@ -160,18 +166,34 @@ export function detectCompanyFromText(text: string): Company | undefined {
   return undefined
 }
 
-function detectTransporterFromText(text: string): Transporter | undefined {
-  const lower = text.toLowerCase()
-  // "Livraison en relais Pickup" / "relais Pickup" is DPD France's pickup-point
-  // service. Use the specific phrase — plain "pickup" is too generic and appears
-  // in Colissimo module footer text on all PrestaShop invoices.
-  if (/relais\s+pickup/i.test(text)) return 'dpd'
-  if (lower.includes('predict') || lower.includes('dpd')) return 'dpd'
-  if (lower.includes('geodis')) return 'geodis'
-  // "colissimo" may appear in the footer of every PrestaShop invoice; check last
-  // so it only wins when no stronger DPD/GEODIS signal was found.
-  if (lower.includes('colissimo')) return 'colissimo'
+/**
+ * Map a *carrier name* (as printed on an invoice's carrier line) to one of our
+ * transporter buckets. This is keyword-mapped from a SPECIFIC string — the
+ * carrier cell of the order's Transporteurs table — never from a whole page,
+ * because PrestaShop pages always carry advertising modules ("Transporteur GLS",
+ * "Associer cette commande à Colissimo") that would otherwise win.
+ *
+ * Carrier wordings seen in the wild:
+ *   "Colissimo Points de retrait"          → colissimo
+ *   "Livraison en relais Pickup"           → dpd  (Pickup is DPD France)
+ *   "GEODIS - livraison sur rendez-vous"   → geodis
+ *   "Click & Collect"                      → retrait (in-store pickup, free)
+ */
+function carrierFromName(name: string): Transporter | undefined {
+  const s = name.toLowerCase()
+  // In-store pickup / Click & Collect — no real carrier, shipping is offered.
+  if (/click\s*&?\s*collect|click\s+and\s+collect|retrait\s+(en\s+)?(magasin|boutique)/.test(s))
+    return 'retrait'
+  // DPD France services: "relais Pickup", "Predict", plain "DPD".
+  if (/relais\s*pickup|\bpickup\b|predict|\bdpd\b/.test(s)) return 'dpd'
+  if (/geodis/.test(s)) return 'geodis'
+  if (/colissimo|la\s*poste|so\s*colissimo/.test(s)) return 'colissimo'
   return undefined
+}
+
+/** Backward-compatible alias used by the Duhallé / old-Jocondienne parsers. */
+function detectTransporterFromText(text: string): Transporter | undefined {
+  return carrierFromName(text)
 }
 
 /**
@@ -314,17 +336,36 @@ function firstAmount(text: string, re: RegExp): number | null {
   return m ? parseFrAmount(m[1]) : null
 }
 
+/** Largest strict-decimal "€" amount on the page (last-resort total). */
+function maxStrictAmount(text: string): number {
+  const amounts = [...text.matchAll(/(\d[\d ]*[,.]\d{2})\s*€/g)]
+    .map((m) => parseFrAmount(m[1]))
+    .filter((n) => n > 0)
+  return amounts.length ? Math.max(...amounts) : 0
+}
+
 /**
  * Parse a PrestaShop order-detail page (one order per PDF, reached via OCR
  * because the text is rasterized as vector outlines).
  *
- * Layout cues (see the rendered sample):
- *   "Commande #3812 MTSVMGLMO"      → order number + reference code
- *   "01/05/2026 09:50:03"            → order date (first date on the page)
- *   "Produits 3,55 € Livraison 5,26 € Total 8,81 €"  → totals line
- *   "Frais d'expédition 5,26 €"      → shipping (Transporteurs table)
- *   "Total frais de port (TTC) : 5,26 €"  → shipping (carrier slip)
- *   "Colissimo Points de retrait"    → carrier
+ * DESIGN — one authoritative line per field (no "read the whole page and guess").
+ * Each value is taken from the single table row that semantically holds it, so
+ * the result is deterministic and immune to the advertising modules PrestaShop
+ * prints on every order ("Transporteur GLS", "Associer à Colissimo", …).
+ *
+ *   • Carrier  → the "Transporteurs" table data row
+ *                "01/05/2026  Colissimo Points de retrait  0.100 Kg  5,26 €  …"
+ *                The carrier cell (between the row date and the weight) is the
+ *                ONLY reliable carrier signal; the page elsewhere advertises GLS
+ *                and Colissimo regardless of who actually shipped.
+ *   • Shipping → the order summary "Livraison" amount, which keeps its decimal
+ *                comma across OCR even when the Transporteurs row mangles it
+ *                ("7,41 €" → "TA1E"). Handles both summary layouts (vertical
+ *                "Livraison\n7,41 €" and horizontal "Produits Livraison Total\n
+ *                56,65 € 9,27 €").
+ *   • Total    → the "Documents" table "Facture #FA… 8,81 €" row, whose amount
+ *                column keeps the comma — unlike the boxed "Total" header cells
+ *                that OCR routinely drops (producing "881" for "8,81").
  */
 export function parsePrestashopOrder(
   text: string,
@@ -341,71 +382,67 @@ export function parsePrestashopOrder(
     }
     const id = idMatch[1]
 
-    // First date on the page is the order date ("01/05/2026 ...")
+    // First date on the page is the order date ("01/05/2026 ...").
     const dateMatch = text.match(/(\d{2})\/(\d{2})\/(\d{4})/)
     const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : ''
 
-    // Shipping cost detection — priority order from most specific to least.
-    //
-    // Key constraints used throughout:
-    //   • [^€]{0,N}?  — lazy, crosses newlines but stops at any € sign, so it
-    //     always finds the FIRST € amount after the label without skipping over
-    //     earlier prices.
-    //   • (\d[\d]*[,. ]\d{2})  — "strict monetary" capture: requires a decimal
-    //     separator (comma, dot, or space) followed by exactly 2 digits. This
-    //     rejects OCR artifacts like "7A1" (Tesseract reading "," as "A") or
-    //     bare single digits, while accepting "5,26" / "7 41" / "37.00".
-    //
-    // The carrier-name pattern is intentionally LAST because it may match
-    // a product total that appears before the shipping amount on the same line.
-    const shippingCost =
-      // 1. "Total frais de port (TTC) : 5,26 €"  — same line or next line
-      firstAmount(text, /total\s+frais\s+de\s+port[^€]{0,60}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
-      // 2. "Frais d'expédition" table header → carrier row → amount
-      //    May span 2 lines: header\ndate carrier\namount  (up to ~120 chars)
-      firstAmount(text, /frais\s+d['']exp[ée]dition[^€]{0,120}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
-      // 3. Generic "frais de port" anywhere (covers Colissimo slip labels)
-      firstAmount(text, /frais\s+de\s+port[^€]{0,60}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
-      // 4. Weight line: whitespace-only gap between "kg" and the amount
-      //    Strict: rejects "Kg 7A1€" (OCR artifact) because "A" is not in [\d ,.]
-      firstAmount(text, /\bkg\s+(\d[\d]*[,. ]\d{2})\s*€/i) ??
-      // 5. Summary column "Livraison\n7,41€" or "Livraison 5,26€"
-      firstAmount(text, /livraison\s+([\d][\d .,]*)\s*€/i) ??
-      // 6. Carrier name line (last resort)
-      firstAmount(
-        text,
-        /(?:colissimo|dpd|predict|pickup|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?(\d[\d]*[,. ]\d{2})\s*€/i
-      ) ??
-      0
+    // ---- Carrier: the single "Transporteurs" table data row (authoritative) --
+    // Restrict the search to a window right after the "Transporteurs (n)" heading
+    // so the later "Transporteur GLS" / "Associer à Colissimo" modules can never
+    // interfere.
+    let carrierName = ''
+    let orderTransporter: Transporter | undefined
+    const tIdx = text.search(/Transporteurs?\s*\(/i)
+    if (tIdx >= 0) {
+      const window = text.slice(tIdx, tIdx + 320)
+      // Row: <date> <carrier name…> <weight> Kg …  — capture the carrier cell.
+      const row = window.match(
+        /\d{2}\/\d{2}\/\d{4}\s+([A-Za-zÀ-ÿ&'’.\- ]+?)\s+\d[\d.,]*\s*Kg/i
+      )
+      if (row) carrierName = row[1].trim()
+      // Map the cell first; if that failed, scan the (module-free) window.
+      orderTransporter = carrierFromName(carrierName) || carrierFromName(window)
+    }
+    orderTransporter = orderTransporter || transporter || 'colissimo'
 
-    // Total TTC — the Documents table keeps "Facture #FA… 8,81 €" on one row.
-    // Use the strict monetary pattern (requires decimal separator + 2 digits) so
-    // that OCR-garbled values like "881 €" (decimal comma dropped by Tesseract)
-    // are rejected and we fall through to the summary-line fallback instead.
-    // Fallback: take the largest strict-monetary amount on the page — the order
-    // summary always shows "Total 8,81 €" with the decimal intact.
-    let totalTTC: number | null =
-      firstAmount(text, /facture\s+#?\s*fa\d+\s+(\d[\d]*[,. ]\d{2})\s*€/i) ??
-      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+(\d[\d]*[,. ]\d{2})\s*€/i)
-    if (totalTTC == null) {
-      // Only accept amounts that have an explicit decimal part (2 digits after
-      // separator). This rejects bare integers produced by OCR dropping the comma.
-      const amounts = [...text.matchAll(/(\d[\d]*[,. ]\d{2})\s*€/g)]
-        .map((m) => parseFrAmount(m[1]))
-        .filter((n) => n > 0)
-      totalTTC = amounts.length ? Math.max(...amounts) : 0
+    // ---- Shipping cost: the order summary "Livraison" amount --------------
+    let shippingCost: number
+    if (orderTransporter === 'retrait') {
+      // Click & Collect / in-store pickup is always free.
+      shippingCost = 0
+    } else if (/Livraison\s*[\r\n]+\s*(?:gratuit|offert)/i.test(text)) {
+      shippingCost = 0
+    } else {
+      shippingCost =
+        // Horizontal summary FIRST: "Produits Livraison [Total]\n 56,65 € 9,27 €"
+        // → the 2nd amount is "Livraison". Checked before the vertical pattern
+        // because here "Livraison" is immediately followed by the *Produits*
+        // amount, which the vertical pattern would grab by mistake.
+        (() => {
+          const m = text.match(
+            /Produits\s+Livraison(?:\s+Total)?\s*[\r\n]+\s*\d[\d ]*[,.]\d{2}\s*€\s+(\d[\d ]*[,.]\d{2})\s*€/i
+          )
+          return m ? parseFrAmount(m[1]) : null
+        })() ??
+        // Vertical summary:   "Livraison\n7,41 €"
+        firstAmount(text, /\bLivraison\s*[\r\n]+\s*(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        // Carrier slip:       "Total frais de port (TTC) : 5,26 €"
+        firstAmount(text, /total\s+frais\s+de\s+port[^€]{0,40}?(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        // Transporteurs row:  "… 0.100 Kg 5,26 €" (last; OCR may mangle it)
+        firstAmount(text, /\bKg\s+(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        0
     }
 
-    // Carrier from content (auto), falling back to the caller hint.
-    const orderTransporter = detectTransporterFromText(text) || transporter || 'colissimo'
+    // ---- Total TTC: the "Documents" table "Facture #FA…" row --------------
+    // Anchored on the leading date so it never matches the products table's
+    // "Total Facture" header column.
+    const totalTTC =
+      firstAmount(text, /\d{2}\/\d{2}\/\d{4}\s+Facture\s+\S+\s+(\d[\d ]*[,.]\d{2})\s*€/i) ??
+      firstAmount(text, /\d{2}\/\d{2}\/\d{4}\s+Bon\s+de\s+livraison\s+\S+\s+(\d[\d ]*[,.]\d{2})\s*€/i) ??
+      // Last resort: largest strict-decimal amount on the page.
+      maxStrictAmount(text)
 
-    // Best-effort human-readable delivery mode.
-    const modeMatch = text.match(
-      /(Colissimo[^\d€\n]{0,30}|Chronopost[^\d€\n]{0,30}|DPD[^\d€\n]{0,30}|GEODIS[^\d€\n]{0,30}|Mondial Relay[^\d€\n]{0,30})/i
-    )
-    const deliveryMode = modeMatch
-      ? modeMatch[1].trim()
-      : TRANSPORTER_DEFAULT_MODE[orderTransporter]
+    const deliveryMode = carrierName || TRANSPORTER_DEFAULT_MODE[orderTransporter]
 
     orders.push({
       id: id.trim(),
@@ -427,6 +464,7 @@ const TRANSPORTER_DEFAULT_MODE: Record<Transporter, string> = {
   colissimo: 'Colissimo',
   dpd: 'DPD',
   geodis: 'GEODIS',
+  retrait: 'Retrait magasin',
 }
 
 /**
@@ -440,7 +478,14 @@ export function parsePdfTextContent(
 ): ParsedPDFResult {
   let format = detectPdfFormat(text)
   if (format === 'unknown') {
-    format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
+    // A page with an order number that is NOT an Oxatis invoice is a PrestaShop
+    // order whose markers were garbled by OCR — route it to the PrestaShop parser
+    // rather than letting it fall through to a parser that would drop it entirely.
+    if (/Commande\s*#?\s*\d+/i.test(text) && !/Montant Total TTC/i.test(text)) {
+      format = 'prestashop-order'
+    } else {
+      format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
+    }
   }
 
   // Trust the content for the company when it carries an explicit signal.

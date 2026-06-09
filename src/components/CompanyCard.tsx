@@ -11,6 +11,7 @@ const TRANSPORTER_COLORS: Record<string, string> = {
   colissimo: '#15431F',
   dpd: '#7B1A1A',
   geodis: '#0D3B6E',
+  retrait: '#7A4A12',
 }
 
 export default function CompanyCard({ company, reports }: CompanyCardProps) {

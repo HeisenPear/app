@@ -156,13 +156,14 @@ async function runTask(
   try {
     const text = await ocrPdf(bytes, {
       onPage: onOcrPage,
-      // Stop as soon as we have id + date + a positive total + a known carrier
-      // (typically after page 1–2), to avoid OCR'ing every page needlessly.
+      // Stop as soon as we have id + date + a positive total AND we have seen the
+      // authoritative "Transporteurs" table (which carries the real carrier +
+      // shipping). This is typically page 2, so we avoid OCR'ing later pages.
       shouldStop: (acc) => {
         const probe = parsePdfTextContent(acc, task.company, task.transporter)
         const o = probe.orders[0]
         return Boolean(
-          o && o.id && o.date && o.totalTTC > 0 && /colissimo|dpd|predict|geodis/i.test(acc)
+          o && o.id && o.date && o.totalTTC > 0 && /Transporteurs?\s*\(/i.test(acc)
         )
       },
     })
