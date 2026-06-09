@@ -88,7 +88,7 @@ async function expandUploadedFile(uf: UploadedFile): Promise<UploadedFile[]> {
     }
 
     const uint8 = await entry.async('uint8array')
-    const file = new File([uint8], base, { type: mimeTypes[fileExt] ?? 'application/octet-stream' })
+    const file = new File([uint8.buffer as ArrayBuffer], base, { type: mimeTypes[fileExt] ?? 'application/octet-stream' })
 
     // Mirror the transporter-from-filename logic used by the server-side ZIP parser
     let fileTransporter = uf.transporter
