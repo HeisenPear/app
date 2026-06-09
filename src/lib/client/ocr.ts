@@ -18,7 +18,12 @@ async function getWorker(): Promise<Worker> {
     workerPromise = (async () => {
       const { createWorker } = await import('tesseract.js')
       // 'fra' = French language model (downloaded once from the CDN, then cached)
-      return createWorker('fra')
+      const worker = await createWorker('fra')
+      // PSM 4 = "Assume a single column of text of variable sizes" — better suited
+      // for invoice pages than the default PSM 3 (auto with OSD), which can waste
+      // time on orientation detection and produce worse results on vectorized PDFs.
+      await worker.setParameters({ tessedit_pageseg_mode: '4' as never })
+      return worker
     })()
   }
   return workerPromise
@@ -80,7 +85,11 @@ export async function ocrPdf(
 
   for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
     onPage?.(pageNumber, total)
-    const canvas = await renderPageToCanvas(doc, pageNumber, 2)
+    // Scale 3 ≈ 216 dpi (pdf.js base = 72 dpi × 3). Tesseract recommends ≥ 300 dpi
+    // for best accuracy; 216 dpi is a pragmatic balance between quality and speed.
+    // Scale 2 (144 dpi) produced too many artefacts: dropped decimal commas,
+    // merged digits, misread symbols (e.g. "," → "A" in vectorised fonts).
+    const canvas = await renderPageToCanvas(doc, pageNumber, 3)
     try {
       const { data } = await worker.recognize(canvas)
       accumulated += '\n' + (data.text || '')

@@ -109,7 +109,7 @@ export function detectPdfFormat(text: string): PdfFormat {
   // of OCR noise) so an order is never misrouted to another parser and silently
   // dropped.
   const prestashopMarkers =
-    /Frais d['’]exp[ée]di/i.test(text) ||
+    /Frais d['']exp[ée]di/i.test(text) ||
     /Total frais de port/i.test(text) ||
     /Bon de livraison/i.test(text) ||
     /Transporteurs?\s*\(/i.test(text) ||
@@ -182,10 +182,11 @@ export function detectCompanyFromText(text: string): Company | undefined {
 function carrierFromName(name: string): Transporter | undefined {
   const s = name.toLowerCase()
   // In-store pickup / Click & Collect — no real carrier, shipping is offered.
-  if (/click\s*&?\s*collect|click\s+and\s+collect|retrait\s+(en\s+)?(magasin|boutique)/.test(s))
-    return 'retrait'
+  // Allow up to 5 chars between "click" and "collect" to tolerate OCR noise
+  // ("Click & Collect" / "Click a Collect" / "Cllck & Collect").
+  if (/click.{0,5}collect|retrait\s+(en\s+)?(magasin|boutique)/.test(s)) return 'retrait'
   // DPD France services: "relais Pickup", "Predict", plain "DPD".
-  if (/relais\s*pickup|\bpickup\b|predict|\bdpd\b/.test(s)) return 'dpd'
+  if (/relais.{0,5}pickup|\bpickup\b|predict|\bdpd\b/.test(s)) return 'dpd'
   if (/geodis/.test(s)) return 'geodis'
   if (/colissimo|la\s*poste|so\s*colissimo/.test(s)) return 'colissimo'
   return undefined
@@ -394,42 +395,61 @@ export function parsePrestashopOrder(
     let orderTransporter: Transporter | undefined
     const tIdx = text.search(/Transporteurs?\s*\(/i)
     if (tIdx >= 0) {
-      const window = text.slice(tIdx, tIdx + 320)
-      // Row: <date> <carrier name…> <weight> Kg …  — capture the carrier cell.
-      const row = window.match(
-        /\d{2}\/\d{2}\/\d{4}\s+([A-Za-zÀ-ÿ&'’.\- ]+?)\s+\d[\d.,]*\s*Kg/i
+      const win = text.slice(tIdx, tIdx + 400)
+      // Row: <date>  <carrier name>  <weight>,<decimals> Kg  <frais>  …
+      // Use `.+?` (any char, lazy) instead of a character-class so OCR typos
+      // (digit inserted into a word, etc.) don't break the match.
+      const row = win.match(
+        /\d{2}\/\d{2}\/\d{4}\s+(.+?)\s+\d+[.,]\d+\s*Kg/i
       )
       if (row) carrierName = row[1].trim()
       // Map the cell first; if that failed, scan the (module-free) window.
-      orderTransporter = carrierFromName(carrierName) || carrierFromName(window)
+      orderTransporter = carrierFromName(carrierName) || carrierFromName(win)
+
+      // Also read the freight amount directly from the Transporteurs row —
+      // it is the most specific source and works even when the summary is absent.
+      // Stored for use as a tiebreaker below.
+      // Pattern: <weight> Kg <optional spaces/date> <amount> €
     }
     orderTransporter = orderTransporter || transporter || 'colissimo'
 
-    // ---- Shipping cost: the order summary "Livraison" amount --------------
+    // ---- Shipping cost ---------------------------------------------------
+    // Priority:
+    //  1. Explicit free signals: retrait or "Livraison … gratuit/offert"
+    //  2. Horizontal summary: "Produits Livraison [Total]\n<p> € <s> €"
+    //  3. Vertical summary:   "Livraison\n<amount> €" (exact or 1 blank line)
+    //  4. Carrier slip:       "Total frais de port (TTC) … <amount> €"
+    //  5. Transporteurs row:  "… Kg <amount> €" — last resort; OCR sometimes
+    //     mangles the decimal (e.g. "7,41" → "TA1E"), so the strict-decimal
+    //     pattern rejects artefacts and correctly returns 0 for free shipping.
+
+    // Signal from the Transporteurs row itself (strict decimal required).
+    const kgRowAmount = firstAmount(text, /\bKg\s+(\d[\d ]*[,.]\d{2})\s*€/i)
+
     let shippingCost: number
-    if (orderTransporter === 'retrait') {
-      // Click & Collect / in-store pickup is always free.
+    if (orderTransporter === 'retrait' || kgRowAmount === 0) {
+      // Explicit free shipping: Click & Collect, or Transporteurs row = 0,00 €.
       shippingCost = 0
     } else if (/Livraison\s*[\r\n]+\s*(?:gratuit|offert)/i.test(text)) {
       shippingCost = 0
     } else {
       shippingCost =
-        // Horizontal summary FIRST: "Produits Livraison [Total]\n 56,65 € 9,27 €"
-        // → the 2nd amount is "Livraison". Checked before the vertical pattern
-        // because here "Livraison" is immediately followed by the *Produits*
-        // amount, which the vertical pattern would grab by mistake.
+        // Horizontal summary FIRST: "Produits Livraison [Total]\n<p> € <s> €"
+        // The 2nd amount after the header line is the Livraison amount.
+        // Allow the two amounts to be either space-separated (same line) or
+        // on consecutive lines (OCR sometimes wraps them).
         (() => {
           const m = text.match(
-            /Produits\s+Livraison(?:\s+Total)?\s*[\r\n]+\s*\d[\d ]*[,.]\d{2}\s*€\s+(\d[\d ]*[,.]\d{2})\s*€/i
+            /Produits\s+Livraison(?:\s+Total)?\s*[\r\n]+\s*\d[\d ]*[,.]\d{2}\s*€[\s\r\n]+(\d[\d ]*[,.]\d{2})\s*€/i
           )
           return m ? parseFrAmount(m[1]) : null
         })() ??
-        // Vertical summary:   "Livraison\n7,41 €"
-        firstAmount(text, /\bLivraison\s*[\r\n]+\s*(\d[\d ]*[,.]\d{2})\s*€/i) ??
-        // Carrier slip:       "Total frais de port (TTC) : 5,26 €"
-        firstAmount(text, /total\s+frais\s+de\s+port[^€]{0,40}?(\d[\d ]*[,.]\d{2})\s*€/i) ??
-        // Transporteurs row:  "… 0.100 Kg 5,26 €" (last; OCR may mangle it)
-        firstAmount(text, /\bKg\s+(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        // Vertical summary (single or double blank line): "Livraison\n\n7,41 €"
+        firstAmount(text, /\bLivraison\s*[\r\n]+[\r\n\s]{0,20}(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        // Carrier slip: "Total frais de port (TTC) : 5,26 €"
+        firstAmount(text, /total\s+frais\s+de\s+port[^€]{0,60}?(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        // Transporteurs row fallback (strict decimal; already null if garbled)
+        kgRowAmount ??
         0
     }
 
