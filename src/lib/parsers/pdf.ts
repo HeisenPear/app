@@ -162,9 +162,14 @@ export function detectCompanyFromText(text: string): Company | undefined {
 
 function detectTransporterFromText(text: string): Transporter | undefined {
   const lower = text.toLowerCase()
-  // Predict and Pickup (relais Pickup) are DPD France services
-  if (lower.includes('predict') || lower.includes('dpd') || lower.includes('pickup')) return 'dpd'
+  // "Livraison en relais Pickup" / "relais Pickup" is DPD France's pickup-point
+  // service. Use the specific phrase — plain "pickup" is too generic and appears
+  // in Colissimo module footer text on all PrestaShop invoices.
+  if (/relais\s+pickup/i.test(text)) return 'dpd'
+  if (lower.includes('predict') || lower.includes('dpd')) return 'dpd'
   if (lower.includes('geodis')) return 'geodis'
+  // "colissimo" may appear in the footer of every PrestaShop invoice; check last
+  // so it only wins when no stronger DPD/GEODIS signal was found.
   if (lower.includes('colissimo')) return 'colissimo'
   return undefined
 }
@@ -374,12 +379,18 @@ export function parsePrestashopOrder(
       0
 
     // Total TTC — the Documents table keeps "Facture #FA… 8,81 €" on one row.
-    // Fallback to the largest amount on the page (the order total is the max).
+    // Use the strict monetary pattern (requires decimal separator + 2 digits) so
+    // that OCR-garbled values like "881 €" (decimal comma dropped by Tesseract)
+    // are rejected and we fall through to the summary-line fallback instead.
+    // Fallback: take the largest strict-monetary amount on the page — the order
+    // summary always shows "Total 8,81 €" with the decimal intact.
     let totalTTC: number | null =
-      firstAmount(text, /facture\s+#?\s*fa\d+\s+([\d][\d .,]*)\s*€/i) ??
-      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+([\d][\d .,]*)\s*€/i)
+      firstAmount(text, /facture\s+#?\s*fa\d+\s+(\d[\d]*[,. ]\d{2})\s*€/i) ??
+      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+(\d[\d]*[,. ]\d{2})\s*€/i)
     if (totalTTC == null) {
-      const amounts = [...text.matchAll(/([\d][\d .,]*)\s*€/g)]
+      // Only accept amounts that have an explicit decimal part (2 digits after
+      // separator). This rejects bare integers produced by OCR dropping the comma.
+      const amounts = [...text.matchAll(/(\d[\d]*[,. ]\d{2})\s*€/g)]
         .map((m) => parseFrAmount(m[1]))
         .filter((n) => n > 0)
       totalTTC = amounts.length ? Math.max(...amounts) : 0
