@@ -65,7 +65,8 @@ async function expandUploadedFile(uf: UploadedFile): Promise<UploadedFile[]> {
     return [uf]
   }
 
-  // Extract ZIP in the browser and emit one entry per contained file
+  // Extract ZIP in the browser and emit one entry per contained file.
+  // Use uint8array (not blob) for reliable binary extraction of PDFs.
   const arrayBuffer = await uf.file.arrayBuffer()
   const zip = await JSZip.loadAsync(arrayBuffer)
   const results: UploadedFile[] = []
@@ -76,11 +77,18 @@ async function expandUploadedFile(uf: UploadedFile): Promise<UploadedFile[]> {
     if (path.startsWith('__MACOSX/') || base.startsWith('._') || base === '.DS_Store') continue
 
     const lower = base.toLowerCase()
-    const fileExt = lower.split('.').pop()
-    if (!['csv', 'xlsx', 'xls', 'pdf'].includes(fileExt ?? '')) continue
+    const fileExt = lower.split('.').pop() ?? ''
+    if (!['csv', 'xlsx', 'xls', 'pdf'].includes(fileExt)) continue
 
-    const blob = await entry.async('blob')
-    const file = new File([blob], base, { type: blob.type || 'application/octet-stream' })
+    const mimeTypes: Record<string, string> = {
+      pdf: 'application/pdf',
+      csv: 'text/csv',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      xls: 'application/vnd.ms-excel',
+    }
+
+    const uint8 = await entry.async('uint8array')
+    const file = new File([uint8], base, { type: mimeTypes[fileExt] ?? 'application/octet-stream' })
 
     // Mirror the transporter-from-filename logic used by the server-side ZIP parser
     let fileTransporter = uf.transporter
@@ -101,6 +109,7 @@ export default function UploadPage() {
   const { setProcessedData, setIsProcessing, setIsExporting, isProcessing, isExporting, processedData } = useAppStore()
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [processError, setProcessError] = useState<string | null>(null)
+  const [processWarnings, setProcessWarnings] = useState<string[]>([])
   const [processSuccess, setProcessSuccess] = useState(false)
   const [persist, setPersist] = useState(true)
   const [label, setLabel] = useState('')
@@ -111,6 +120,7 @@ export default function UploadPage() {
     setUploadedFiles(files)
     setProcessSuccess(false)
     setProcessError(null)
+    setProcessWarnings([])
     setSavedLabel(null)
     setPersistWarning(null)
   }
@@ -120,6 +130,7 @@ export default function UploadPage() {
 
     setIsProcessing(true)
     setProcessError(null)
+    setProcessWarnings([])
     setProcessSuccess(false)
     setSavedLabel(null)
     setPersistWarning(null)
@@ -133,7 +144,10 @@ export default function UploadPage() {
       }
 
       const fileResults: Array<ProcessedData & { errors?: string[] }> = []
+      // Hard errors: request/network failures
       const fileErrors: string[] = []
+      // Soft warnings: parse issues (no text, unknown format, …)
+      const parseWarnings: string[] = []
 
       for (const uf of expandedFiles) {
         const formData = new FormData()
@@ -152,7 +166,11 @@ export default function UploadPage() {
               : `Erreur HTTP ${response.status}`
           fileErrors.push(`[${uf.file.name}] : ${msg}`)
         } else {
-          fileResults.push(data as ProcessedData & { errors?: string[] })
+          const result = data as ProcessedData & { errors?: string[] }
+          if (result.errors?.length) {
+            parseWarnings.push(...result.errors.map(e => `[${uf.file.name}] ${e}`))
+          }
+          fileResults.push(result)
         }
       }
 
@@ -160,11 +178,12 @@ export default function UploadPage() {
         throw new Error(fileErrors.join('\n') || 'Aucun fichier traité avec succès.')
       }
 
-      const { merged, errors } = mergeResults(fileResults)
-      if (fileErrors.length) errors.push(...fileErrors)
+      const { merged, errors: mergeWarnings } = mergeResults(fileResults)
+      const allWarnings = [...parseWarnings, ...mergeWarnings, ...fileErrors]
 
       setProcessedData(merged)
       setProcessSuccess(true)
+      if (allWarnings.length) setProcessWarnings(allWarnings)
 
       // Persist the merged result if requested
       if (persist) {
@@ -179,10 +198,6 @@ export default function UploadPage() {
           if (s.batch) setSavedLabel(s.batch.label)
           else if (s.error) setPersistWarning(s.error)
         }
-      }
-
-      if (errors.length > 0) {
-        setProcessError(errors.join('\n'))
       }
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : 'Erreur inconnue')
@@ -314,6 +329,23 @@ export default function UploadPage() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {processWarnings.length > 0 && (
+        <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg mb-6">
+          <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <div className="font-medium text-amber-800">
+              {processWarnings.length} fichier{processWarnings.length > 1 ? 's' : ''} avec avertissement
+            </div>
+            <ul className="text-sm text-amber-700 mt-1 space-y-0.5 list-disc list-inside">
+              {processWarnings.slice(0, 10).map((w, i) => <li key={i}>{w}</li>)}
+              {processWarnings.length > 10 && (
+                <li>…et {processWarnings.length - 10} autres</li>
+              )}
+            </ul>
           </div>
         </div>
       )}
