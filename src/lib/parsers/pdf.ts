@@ -130,11 +130,19 @@ export function detectPdfFormat(text: string): PdfFormat {
   return 'unknown'
 }
 
-/** Map a detected invoice layout to the company that issues it. */
+/**
+ * Map a detected invoice layout to the company that issues it.
+ *
+ * The two companies use different e-commerce platforms, so the PDF layout is a
+ * reliable company signal:
+ *   - Duhallé Boutique → Oxatis multi-invoice exports (duhalle-oxatis)
+ *   - La Jocondienne   → PrestaShop order pages (prestashop-order) and the
+ *                        older single "#FA…" invoices (jocondienne)
+ */
 export function companyFromFormat(format: PdfFormat): Company | undefined {
   if (format === 'duhalle-oxatis') return 'duhalle'
   if (format === 'jocondienne') return 'jocondienne'
-  // prestashop-order is used by both companies — company comes from content/hint
+  if (format === 'prestashop-order') return 'jocondienne'
   return undefined
 }
 
