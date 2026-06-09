@@ -79,7 +79,7 @@ export function ddmmyyyyToISO(input: string | null | undefined): string {
  * guaranteed newlines), so the invoice parsers below must not depend on line
  * breaks.
  */
-export async function extractPdfText(buffer: Buffer): Promise<string> {
+export async function extractPdfText(buffer: Buffer | Uint8Array): Promise<string> {
   const pdf = await getDocumentProxy(new Uint8Array(buffer))
   const { text } = await extractText(pdf, { mergePages: true })
   return text || ''
@@ -267,7 +267,7 @@ export function parseJocondienne(
  * content is ambiguous.
  */
 export async function parsePDF(
-  buffer: Buffer,
+  buffer: Buffer | Uint8Array,
   company: Company,
   transporter?: Transporter
 ): Promise<ParsedPDFResult> {

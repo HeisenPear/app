@@ -3,106 +3,11 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { FileText, Download, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
-import JSZip from 'jszip'
 import { useAppStore } from '@/store'
 import FileDropZone from '@/components/FileDropZone'
-import { calculateStats } from '@/lib/processors/stats'
-import type { UploadedFile, Order, Dispute, Company, Transporter, ProcessedData, CompanyReport } from '@/lib/types'
-
-/** Files larger than this are extracted client-side if they are ZIPs. */
-const MAX_DIRECT_BYTES = 4 * 1024 * 1024 // 4 MB
-
-function resolvePeriod(orders: Order[]): string {
-  if (orders.length === 0) return ''
-  const dates = orders.map(o => o.date).filter(Boolean).sort()
-  if (!dates.length) return ''
-  const first = dates[0]
-  const last = dates[dates.length - 1]
-  return first === last ? first : `${first} — ${last}`
-}
-
-function mergeResults(results: Array<ProcessedData & { errors?: string[] }>): {
-  merged: ProcessedData
-  errors: string[]
-} {
-  const errors: string[] = []
-  const groupMap = new Map<string, { orders: Order[]; disputes: Dispute[] }>()
-
-  for (const result of results) {
-    if (result.errors?.length) errors.push(...result.errors)
-    for (const report of result.reports) {
-      const key = `${report.company}:${report.transporter}`
-      const entry = groupMap.get(key) ?? { orders: [], disputes: [] }
-      entry.orders.push(...report.orders)
-      entry.disputes.push(...report.disputes)
-      groupMap.set(key, entry)
-    }
-  }
-
-  const reports: CompanyReport[] = Array.from(groupMap.entries()).map(([key, { orders, disputes }]) => {
-    const [company, transporter] = key.split(':') as [Company, Transporter]
-    return { company, transporter, period: resolvePeriod(orders), orders, disputes, stats: calculateStats(orders) }
-  })
-
-  const allOrders = reports.flatMap(r => r.orders)
-  return {
-    merged: { reports, globalStats: calculateStats(allOrders), processedAt: new Date().toISOString() },
-    errors,
-  }
-}
-
-/**
- * Expand a single UploadedFile into one or more sendable units.
- *
- * Large ZIP files are extracted client-side so that each contained file is
- * sent as a separate request — keeping every request under Vercel's 4.5 MB
- * serverless-function body limit, regardless of the archive's total size.
- */
-async function expandUploadedFile(uf: UploadedFile): Promise<UploadedFile[]> {
-  const ext = uf.file.name.toLowerCase().split('.').pop()
-
-  if (uf.file.size <= MAX_DIRECT_BYTES || ext !== 'zip') {
-    return [uf]
-  }
-
-  // Extract ZIP in the browser and emit one entry per contained file.
-  // Use uint8array (not blob) for reliable binary extraction of PDFs.
-  const arrayBuffer = await uf.file.arrayBuffer()
-  const zip = await JSZip.loadAsync(arrayBuffer)
-  const results: UploadedFile[] = []
-
-  for (const [path, entry] of Object.entries(zip.files)) {
-    if (entry.dir) continue
-    const base = path.split('/').pop() || path
-    if (path.startsWith('__MACOSX/') || base.startsWith('._') || base === '.DS_Store') continue
-
-    const lower = base.toLowerCase()
-    const fileExt = lower.split('.').pop() ?? ''
-    if (!['csv', 'xlsx', 'xls', 'pdf'].includes(fileExt)) continue
-
-    const mimeTypes: Record<string, string> = {
-      pdf: 'application/pdf',
-      csv: 'text/csv',
-      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      xls: 'application/vnd.ms-excel',
-    }
-
-    const uint8 = await entry.async('uint8array')
-    const file = new File([uint8.buffer as ArrayBuffer], base, { type: mimeTypes[fileExt] ?? 'application/octet-stream' })
-
-    // Mirror the transporter-from-filename logic used by the server-side ZIP parser
-    let fileTransporter = uf.transporter
-    if (!fileTransporter) {
-      if (lower.includes('colissimo') || lower.includes('colis')) fileTransporter = 'colissimo'
-      else if (lower.includes('dpd')) fileTransporter = 'dpd'
-      else if (lower.includes('geodis') || lower.includes('geo')) fileTransporter = 'geodis'
-    }
-
-    results.push({ id: `${uf.id}-${base}`, file, company: uf.company, fileType: uf.fileType, transporter: fileTransporter, status: 'pending' })
-  }
-
-  return results
-}
+import { Progress } from '@/components/ui/progress'
+import type { ProgressInfo } from '@/lib/client/processFiles'
+import type { UploadedFile } from '@/lib/types'
 
 export default function UploadPage() {
   const router = useRouter()
@@ -115,6 +20,7 @@ export default function UploadPage() {
   const [label, setLabel] = useState('')
   const [savedLabel, setSavedLabel] = useState<string | null>(null)
   const [persistWarning, setPersistWarning] = useState<string | null>(null)
+  const [progress, setProgress] = useState<ProgressInfo | null>(null)
 
   const handleFilesChange = (files: UploadedFile[]) => {
     setUploadedFiles(files)
@@ -134,63 +40,36 @@ export default function UploadPage() {
     setProcessSuccess(false)
     setSavedLabel(null)
     setPersistWarning(null)
+    setProgress({ phase: 'extracting', current: '', done: 0, total: 0 })
 
     try {
-      // Expand large ZIPs client-side so every server request stays under 4.5 MB.
-      const expandedFiles: UploadedFile[] = []
-      for (const uf of uploadedFiles) {
-        const expanded = await expandUploadedFile(uf)
-        expandedFiles.push(...expanded)
+      // All parsing happens locally in the browser — no file ever leaves the
+      // machine until we have the small final JSON report. This sidesteps every
+      // serverless limit (4.5 MB body, timeouts, memory) so archives of tens of
+      // MB / hundreds of invoices process reliably. The heavy parsing libs are
+      // lazy-loaded here so they only download when processing actually starts.
+      const { processFilesLocally } = await import('@/lib/client/processFiles')
+      const { data, warnings } = await processFilesLocally(uploadedFiles, setProgress)
+
+      const totalOrders = data.reports.reduce((sum, r) => sum + r.orders.length, 0)
+      if (totalOrders === 0 && data.reports.length === 0) {
+        throw new Error(
+          warnings.length
+            ? `Aucune donnée exploitable.\n${warnings.slice(0, 5).join('\n')}`
+            : 'Aucune donnée exploitable trouvée dans les fichiers.'
+        )
       }
 
-      const fileResults: Array<ProcessedData & { errors?: string[] }> = []
-      // Hard errors: request/network failures
-      const fileErrors: string[] = []
-      // Soft warnings: parse issues (no text, unknown format, …)
-      const parseWarnings: string[] = []
-
-      for (const uf of expandedFiles) {
-        const formData = new FormData()
-        formData.append('files', uf.file)
-        formData.append(`company_${uf.file.name}`, uf.company)
-        formData.append(`fileType_${uf.file.name}`, uf.fileType)
-        if (uf.transporter) formData.append(`transporter_${uf.file.name}`, uf.transporter)
-
-        const response = await fetch('/api/process', { method: 'POST', body: formData })
-        const data = await readJsonResponse(response)
-
-        if (!response.ok) {
-          const msg =
-            data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
-              ? (data as { error: string }).error
-              : `Erreur HTTP ${response.status}`
-          fileErrors.push(`[${uf.file.name}] : ${msg}`)
-        } else {
-          const result = data as ProcessedData & { errors?: string[] }
-          if (result.errors?.length) {
-            parseWarnings.push(...result.errors.map(e => `[${uf.file.name}] ${e}`))
-          }
-          fileResults.push(result)
-        }
-      }
-
-      if (fileResults.length === 0) {
-        throw new Error(fileErrors.join('\n') || 'Aucun fichier traité avec succès.')
-      }
-
-      const { merged, errors: mergeWarnings } = mergeResults(fileResults)
-      const allWarnings = [...parseWarnings, ...mergeWarnings, ...fileErrors]
-
-      setProcessedData(merged)
+      setProcessedData(data)
       setProcessSuccess(true)
-      if (allWarnings.length) setProcessWarnings(allWarnings)
+      if (warnings.length) setProcessWarnings(warnings)
 
-      // Persist the merged result if requested
+      // Persist only the computed report (small JSON) to shared history.
       if (persist) {
         const saveRes = await fetch('/api/batches', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: merged, label: label.trim() || undefined }),
+          body: JSON.stringify({ data, label: label.trim() || undefined }),
         })
         const saved = await readJsonResponse(saveRes)
         if (saved && typeof saved === 'object') {
@@ -203,6 +82,7 @@ export default function UploadPage() {
       setProcessError(err instanceof Error ? err.message : 'Erreur inconnue')
     } finally {
       setIsProcessing(false)
+      setProgress(null)
     }
   }
 
@@ -300,6 +180,28 @@ export default function UploadPage() {
           </div>
         )}
       </div>
+
+      {/* Live progress (local processing) */}
+      {isProcessing && progress && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-900">
+              {progress.phase === 'extracting' && 'Décompression de l’archive…'}
+              {progress.phase === 'parsing' && 'Analyse des fichiers (en local)…'}
+              {progress.phase === 'finalizing' && 'Calcul des statistiques…'}
+            </span>
+            {progress.total > 0 && (
+              <span className="text-sm text-gray-500">
+                {progress.done} / {progress.total}
+              </span>
+            )}
+          </div>
+          <Progress value={progress.total > 0 ? (progress.done / progress.total) * 100 : 10} />
+          {progress.current && (
+            <div className="text-xs text-gray-400 mt-2 truncate">{progress.current}</div>
+          )}
+        </div>
+      )}
 
       {/* Status messages */}
       {processError && (
