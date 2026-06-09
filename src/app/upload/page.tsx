@@ -5,7 +5,47 @@ import { useRouter } from 'next/navigation'
 import { FileText, Download, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
 import { useAppStore } from '@/store'
 import FileDropZone from '@/components/FileDropZone'
-import type { UploadedFile } from '@/lib/types'
+import { calculateStats } from '@/lib/processors/stats'
+import type { UploadedFile, Order, Dispute, Company, Transporter, ProcessedData, CompanyReport } from '@/lib/types'
+
+function resolvePeriod(orders: Order[]): string {
+  if (orders.length === 0) return ''
+  const dates = orders.map(o => o.date).filter(Boolean).sort()
+  if (!dates.length) return ''
+  const first = dates[0]
+  const last = dates[dates.length - 1]
+  return first === last ? first : `${first} — ${last}`
+}
+
+function mergeResults(results: Array<ProcessedData & { errors?: string[] }>): {
+  merged: ProcessedData
+  errors: string[]
+} {
+  const errors: string[] = []
+  const groupMap = new Map<string, { orders: Order[]; disputes: Dispute[] }>()
+
+  for (const result of results) {
+    if (result.errors?.length) errors.push(...result.errors)
+    for (const report of result.reports) {
+      const key = `${report.company}:${report.transporter}`
+      const entry = groupMap.get(key) ?? { orders: [], disputes: [] }
+      entry.orders.push(...report.orders)
+      entry.disputes.push(...report.disputes)
+      groupMap.set(key, entry)
+    }
+  }
+
+  const reports: CompanyReport[] = Array.from(groupMap.entries()).map(([key, { orders, disputes }]) => {
+    const [company, transporter] = key.split(':') as [Company, Transporter]
+    return { company, transporter, period: resolvePeriod(orders), orders, disputes, stats: calculateStats(orders) }
+  })
+
+  const allOrders = reports.flatMap(r => r.orders)
+  return {
+    merged: { reports, globalStats: calculateStats(allOrders), processedAt: new Date().toISOString() },
+    errors,
+  }
+}
 
 export default function UploadPage() {
   const router = useRouter()
@@ -36,44 +76,59 @@ export default function UploadPage() {
     setPersistWarning(null)
 
     try {
-      const formData = new FormData()
+      // Process each file individually to stay under Vercel's 4.5 MB request limit,
+      // then merge all results client-side.
+      const fileResults: Array<ProcessedData & { errors?: string[] }> = []
+      const fileErrors: string[] = []
+
       for (const uf of uploadedFiles) {
+        const formData = new FormData()
         formData.append('files', uf.file)
         formData.append(`company_${uf.file.name}`, uf.company)
         formData.append(`fileType_${uf.file.name}`, uf.fileType)
-        if (uf.transporter) {
-          formData.append(`transporter_${uf.file.name}`, uf.transporter)
+        if (uf.transporter) formData.append(`transporter_${uf.file.name}`, uf.transporter)
+
+        const response = await fetch('/api/process', { method: 'POST', body: formData })
+        const data = await readJsonResponse(response)
+
+        if (!response.ok) {
+          const msg =
+            data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
+              ? (data as { error: string }).error
+              : `Erreur HTTP ${response.status}`
+          fileErrors.push(`[${uf.file.name}] : ${msg}`)
+        } else {
+          fileResults.push(data as ProcessedData & { errors?: string[] })
         }
       }
-      if (persist) {
-        formData.append('persist', 'true')
-        if (label.trim()) formData.append('label', label.trim())
+
+      if (fileResults.length === 0) {
+        throw new Error(fileErrors.join('\n') || 'Aucun fichier traité avec succès.')
       }
 
-      const response = await fetch('/api/process', {
-        method: 'POST',
-        body: formData,
-      })
+      const { merged, errors } = mergeResults(fileResults)
+      if (fileErrors.length) errors.push(...fileErrors)
 
-      const data = await readJsonResponse(response)
-
-      if (!response.ok) {
-        const serverError =
-          data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
-            ? (data as { error: string }).error
-            : ''
-        throw new Error(serverError || `Erreur lors du traitement (HTTP ${response.status})`)
-      }
-
-      const result = data as typeof processedData & {
-        batch?: { label: string } | null
-        persistError?: string
-      }
-      setProcessedData(result)
+      setProcessedData(merged)
       setProcessSuccess(true)
+
+      // Persist the merged result if requested
       if (persist) {
-        if (result?.batch) setSavedLabel(result.batch.label)
-        else if (result?.persistError) setPersistWarning(result.persistError)
+        const saveRes = await fetch('/api/batches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: merged, label: label.trim() || undefined }),
+        })
+        const saved = await readJsonResponse(saveRes)
+        if (saved && typeof saved === 'object') {
+          const s = saved as { batch?: { label: string }; error?: string }
+          if (s.batch) setSavedLabel(s.batch.label)
+          else if (s.error) setPersistWarning(s.error)
+        }
+      }
+
+      if (errors.length > 0) {
+        setProcessError(errors.join('\n'))
       }
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : 'Erreur inconnue')
