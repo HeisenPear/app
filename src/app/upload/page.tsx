@@ -188,6 +188,7 @@ export default function UploadPage() {
             <span className="text-sm font-medium text-gray-900">
               {progress.phase === 'extracting' && 'Décompression de l’archive…'}
               {progress.phase === 'parsing' && 'Analyse des fichiers (en local)…'}
+              {progress.phase === 'ocr' && 'Lecture OCR des PDF image (en local)…'}
               {progress.phase === 'finalizing' && 'Calcul des statistiques…'}
             </span>
             {progress.total > 0 && (

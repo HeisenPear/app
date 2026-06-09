@@ -1,7 +1,8 @@
 import JSZip from 'jszip'
 import { parseCSV } from '../parsers/csv'
 import { parseExcel } from '../parsers/excel'
-import { parsePDF } from '../parsers/pdf'
+import { parsePDF, parsePdfTextContent, PDF_NO_TEXT_ERROR } from '../parsers/pdf'
+import { ocrPdf, terminateOcr } from './ocr'
 import { processOrders } from '../processors/orders'
 import { processDisputes } from '../processors/disputes'
 import { calculateStats } from '../processors/stats'
@@ -31,7 +32,7 @@ import type {
  */
 
 export interface ProgressInfo {
-  phase: 'extracting' | 'parsing' | 'finalizing'
+  phase: 'extracting' | 'parsing' | 'ocr' | 'finalizing'
   current: string
   done: number
   total: number
@@ -122,9 +123,15 @@ async function buildTasks(
   return tasks
 }
 
+interface RunCallbacks {
+  /** Reports OCR page progress for image/vector PDFs. */
+  onOcrPage?: (page: number, total: number) => void
+}
+
 async function runTask(
-  task: Task
-): Promise<{ orders: Order[]; disputes: Dispute[]; errors: string[] }> {
+  task: Task,
+  { onOcrPage }: RunCallbacks = {}
+): Promise<{ orders: Order[]; disputes: Dispute[]; errors: string[]; usedOcr?: boolean }> {
   const bytes = await task.getBytes()
 
   if (task.ext === 'csv') {
@@ -138,9 +145,47 @@ async function runTask(
     return { orders: r.orders, disputes: r.disputes, errors: r.errors }
   }
 
-  // pdf
+  // PDF — first try the cheap text path.
   const r = await parsePDF(bytes, task.company, task.transporter)
-  return { orders: r.orders, disputes: r.disputes, errors: r.errors }
+  const noText = r.orders.length === 0 && r.errors.some((e) => e === PDF_NO_TEXT_ERROR)
+  if (!noText) {
+    return { orders: r.orders, disputes: r.disputes, errors: r.errors }
+  }
+
+  // No extractable text → OCR fallback (renders pages + Tesseract, all local).
+  try {
+    const text = await ocrPdf(bytes, {
+      onPage: onOcrPage,
+      // Stop as soon as we have id + date + a positive total + a known carrier
+      // (typically after page 1–2), to avoid OCR'ing every page needlessly.
+      shouldStop: (acc) => {
+        const probe = parsePdfTextContent(acc, task.company, task.transporter)
+        const o = probe.orders[0]
+        return Boolean(
+          o && o.id && o.date && o.totalTTC > 0 && /colissimo|dpd|predict|geodis/i.test(acc)
+        )
+      },
+    })
+
+    if (!text.trim()) {
+      return { orders: [], disputes: [], errors: ['OCR : aucun texte reconnu.'], usedOcr: true }
+    }
+
+    const parsed = parsePdfTextContent(text, task.company, task.transporter)
+    return {
+      orders: parsed.orders,
+      disputes: parsed.disputes,
+      errors: parsed.orders.length === 0 ? [...parsed.errors, 'OCR : données non reconnues dans le texte.'] : parsed.errors,
+      usedOcr: true,
+    }
+  } catch (err) {
+    return {
+      orders: [],
+      disputes: [],
+      errors: [`OCR échoué : ${err instanceof Error ? err.message : 'erreur inconnue'}`],
+      usedOcr: true,
+    }
+  }
 }
 
 function resolvePeriod(orders: Order[]): string {
@@ -172,23 +217,36 @@ export async function processFilesLocally(
   const allDisputes: Dispute[] = []
   const warnings: string[] = []
 
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i]
-    onProgress({ phase: 'parsing', current: task.name, done: i, total })
+  try {
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i]
+      onProgress({ phase: 'parsing', current: task.name, done: i, total })
 
-    try {
-      const result = await runTask(task)
-      allOrders.push(...result.orders)
-      allDisputes.push(...result.disputes)
-      if (result.errors.length) {
-        warnings.push(...result.errors.map((e) => `[${task.name}] ${e}`))
+      try {
+        const result = await runTask(task, {
+          onOcrPage: (page, pageTotal) =>
+            onProgress({
+              phase: 'ocr',
+              current: `${task.name} — lecture OCR page ${page}/${pageTotal}`,
+              done: i,
+              total,
+            }),
+        })
+        allOrders.push(...result.orders)
+        allDisputes.push(...result.disputes)
+        if (result.errors.length) {
+          warnings.push(...result.errors.map((e) => `[${task.name}] ${e}`))
+        }
+      } catch (err) {
+        warnings.push(`[${task.name}] ${err instanceof Error ? err.message : 'Erreur de traitement'}`)
       }
-    } catch (err) {
-      warnings.push(`[${task.name}] ${err instanceof Error ? err.message : 'Erreur de traitement'}`)
-    }
 
-    // Repaint between files so the UI never appears frozen.
-    await yieldToUI()
+      // Repaint between files so the UI never appears frozen.
+      await yieldToUI()
+    }
+  } finally {
+    // Always release the OCR worker, even on error.
+    await terminateOcr()
   }
 
   onProgress({ phase: 'finalizing', current: '', done: total, total })

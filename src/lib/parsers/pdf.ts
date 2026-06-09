@@ -8,7 +8,7 @@ export interface ParsedPDFResult {
   format: PdfFormat
 }
 
-export type PdfFormat = 'duhalle-oxatis' | 'jocondienne' | 'unknown'
+export type PdfFormat = 'duhalle-oxatis' | 'jocondienne' | 'prestashop-order' | 'unknown'
 
 const FR_MONTHS: Record<string, string> = {
   janvier: '01',
@@ -94,7 +94,27 @@ export async function extractPdfText(buffer: Buffer | Uint8Array): Promise<strin
  *   - La Jocondienne   → "#FA…" invoices ("Réf. de commande", "Frais de livraison").
  */
 export function detectPdfFormat(text: string): PdfFormat {
-  // Strong, explicit company markers take precedence
+  const hasCommande = /Commande\s*#?\s*\d+/i.test(text)
+
+  // PrestaShop order-detail page (text is rasterized as vectors → reached via
+  // OCR). Distinctive: an order number plus shipping/carrier tables, but NOT
+  // the Oxatis "Montant Total TTC" wording.
+  const prestashopMarkers =
+    /Frais d['’]exp[ée]dition/i.test(text) ||
+    /Total frais de port/i.test(text) ||
+    /Bon de livraison/i.test(text) ||
+    /Transporteurs?\s*\(\s*\d/i.test(text) ||
+    /point\s+retrait/i.test(text)
+  if (hasCommande && prestashopMarkers && !/Montant Total TTC/i.test(text)) {
+    return 'prestashop-order'
+  }
+
+  // Oxatis (Duhallé) multi-invoice export
+  if (/Commande #\d+/.test(text) && /Montant Total TTC/i.test(text)) {
+    return 'duhalle-oxatis'
+  }
+
+  // La Jocondienne single invoice
   const isJocondienne =
     /La Jocondienne/i.test(text) ||
     /#FA\d+/.test(text) ||
@@ -103,13 +123,8 @@ export function detectPdfFormat(text: string): PdfFormat {
 
   const isDuhalle =
     /duhalle/i.test(text) ||
-    /oxatis/i.test(text) ||
-    (/Commande #\d+/.test(text) && /Montant Total TTC/i.test(text))
+    /oxatis/i.test(text)
 
-  // When both could match, prefer the most specific structural signature
-  if (/Commande #\d+/.test(text) && /Montant Total TTC/i.test(text)) {
-    return 'duhalle-oxatis'
-  }
   if (isJocondienne) return 'jocondienne'
   if (isDuhalle) return 'duhalle-oxatis'
   return 'unknown'
@@ -119,6 +134,14 @@ export function detectPdfFormat(text: string): PdfFormat {
 export function companyFromFormat(format: PdfFormat): Company | undefined {
   if (format === 'duhalle-oxatis') return 'duhalle'
   if (format === 'jocondienne') return 'jocondienne'
+  // prestashop-order is used by both companies — company comes from content/hint
+  return undefined
+}
+
+/** Infer the company from explicit name markers anywhere in the text. */
+export function detectCompanyFromText(text: string): Company | undefined {
+  if (/jocondienne/i.test(text)) return 'jocondienne'
+  if (/duhall/i.test(text)) return 'duhalle'
   return undefined
 }
 
@@ -261,17 +284,145 @@ export function parseJocondienne(
   return { orders, errors }
 }
 
+/** First monetary amount captured by `re` (group 1), or null if no match. */
+function firstAmount(text: string, re: RegExp): number | null {
+  const m = text.match(re)
+  return m ? parseFrAmount(m[1]) : null
+}
+
+/**
+ * Parse a PrestaShop order-detail page (one order per PDF, reached via OCR
+ * because the text is rasterized as vector outlines).
+ *
+ * Layout cues (see the rendered sample):
+ *   "Commande #3812 MTSVMGLMO"      → order number + reference code
+ *   "01/05/2026 09:50:03"            → order date (first date on the page)
+ *   "Produits 3,55 € Livraison 5,26 € Total 8,81 €"  → totals line
+ *   "Frais d'expédition 5,26 €"      → shipping (Transporteurs table)
+ *   "Total frais de port (TTC) : 5,26 €"  → shipping (carrier slip)
+ *   "Colissimo Points de retrait"    → carrier
+ */
+export function parsePrestashopOrder(
+  text: string,
+  company: Company,
+  transporter?: Transporter
+): { orders: Order[]; errors: string[] } {
+  const orders: Order[] = []
+  const errors: string[] = []
+
+  try {
+    const idMatch = text.match(/Commande\s*#?\s*(\d+)/i)
+    if (!idMatch) {
+      return { orders, errors: ['Format PrestaShop non reconnu (numéro de commande introuvable)'] }
+    }
+    const id = idMatch[1]
+
+    // First date on the page is the order date ("01/05/2026 ...")
+    const dateMatch = text.match(/(\d{2})\/(\d{2})\/(\d{4})/)
+    const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : ''
+
+    // Shipping cost. OCR flattens tables row-by-row, so labels and values are
+    // NOT adjacent. The carrier row ("Colissimo … 0.100 Kg 5,26 € <tracking>")
+    // keeps the carrier and the shipping amount on one line, which is the most
+    // reliable anchor; the others are fallbacks.
+    const shippingCost =
+      firstAmount(
+        text,
+        /(?:colissimo|dpd|predict|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?([\d][\d\s.,]*)\s*€/i
+      ) ??
+      firstAmount(text, /\bkg\s+([\d][\d\s.,]*)\s*€/i) ??
+      firstAmount(text, /frais\s+de\s+port[^€]{0,40}?([\d][\d\s.,]*)\s*€/i) ??
+      firstAmount(text, /livraison\s+([\d][\d\s.,]*)\s*€/i) ??
+      0
+
+    // Total TTC — the Documents table keeps "Facture #FA… 8,81 €" on one row.
+    // Fallback to the largest amount on the page (the order total is the max).
+    let totalTTC: number | null =
+      firstAmount(text, /facture\s+#?\s*fa\d+\s+([\d][\d\s.,]*)\s*€/i) ??
+      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+([\d][\d\s.,]*)\s*€/i)
+    if (totalTTC == null) {
+      const amounts = [...text.matchAll(/([\d][\d\s.,]*)\s*€/g)]
+        .map((m) => parseFrAmount(m[1]))
+        .filter((n) => n > 0)
+      totalTTC = amounts.length ? Math.max(...amounts) : 0
+    }
+
+    // Carrier from content (auto), falling back to the caller hint.
+    const orderTransporter = detectTransporterFromText(text) || transporter || 'colissimo'
+
+    // Best-effort human-readable delivery mode.
+    const modeMatch = text.match(
+      /(Colissimo[^\d€\n]{0,30}|Chronopost[^\d€\n]{0,30}|DPD[^\d€\n]{0,30}|GEODIS[^\d€\n]{0,30}|Mondial Relay[^\d€\n]{0,30})/i
+    )
+    const deliveryMode = modeMatch
+      ? modeMatch[1].trim()
+      : TRANSPORTER_DEFAULT_MODE[orderTransporter]
+
+    orders.push({
+      id: id.trim(),
+      date,
+      company,
+      transporter: orderTransporter,
+      totalTTC,
+      shippingCost,
+      deliveryMode,
+    })
+  } catch (err) {
+    errors.push(`PrestaShop: ${err instanceof Error ? err.message : 'erreur de parsing'}`)
+  }
+
+  return { orders, errors }
+}
+
+const TRANSPORTER_DEFAULT_MODE: Record<Transporter, string> = {
+  colissimo: 'Colissimo',
+  dpd: 'DPD',
+  geodis: 'GEODIS',
+}
+
+/**
+ * Detect the layout from already-extracted text and dispatch to the matching
+ * parser. Shared by both the text path (parsePDF) and the OCR path.
+ */
+export function parsePdfTextContent(
+  text: string,
+  company: Company,
+  transporter?: Transporter
+): ParsedPDFResult {
+  let format = detectPdfFormat(text)
+  if (format === 'unknown') {
+    format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
+  }
+
+  // Trust the content for the company when it carries an explicit signal.
+  const resolvedCompany =
+    companyFromFormat(format) ?? detectCompanyFromText(text) ?? company
+
+  if (format === 'prestashop-order') {
+    const { orders, errors } = parsePrestashopOrder(text, resolvedCompany, transporter)
+    return { orders, disputes: [], errors, format }
+  }
+  if (format === 'duhalle-oxatis') {
+    const { orders, errors } = parseDuhalleOxatis(text, resolvedCompany, transporter)
+    return { orders, disputes: [], errors, format }
+  }
+  const { orders, errors } = parseJocondienne(text, resolvedCompany, transporter)
+  return { orders, disputes: [], errors, format }
+}
+
+/** Sentinel error so callers (OCR fallback) can detect a no-text PDF. */
+export const PDF_NO_TEXT_ERROR = 'Le PDF ne contient aucun texte extractible (probablement une image / texte vectorisé).'
+
 /**
  * Top-level PDF parser: extracts text, detects the layout and dispatches to the
- * matching invoice parser. The company hint helps select the layout when the
- * content is ambiguous.
+ * matching invoice parser. When the PDF has no extractable text, it returns the
+ * PDF_NO_TEXT_ERROR sentinel so the client can fall back to OCR.
  */
 export async function parsePDF(
   buffer: Buffer | Uint8Array,
   company: Company,
   transporter?: Transporter
 ): Promise<ParsedPDFResult> {
-  const errors: string[] = []
   let text = ''
   try {
     text = await extractPdfText(buffer)
@@ -285,30 +436,8 @@ export async function parsePDF(
   }
 
   if (!text.trim()) {
-    return {
-      orders: [],
-      disputes: [],
-      errors: ['Le PDF ne contient aucun texte extractible (probablement un scan/image).'],
-      format: 'unknown',
-    }
+    return { orders: [], disputes: [], errors: [PDF_NO_TEXT_ERROR], format: 'unknown' }
   }
 
-  let format = detectPdfFormat(text)
-  // Fall back to the company hint when the layout cannot be auto-detected
-  if (format === 'unknown') {
-    format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
-  }
-
-  // The invoice layout reliably identifies the company — trust the PDF content
-  // over the (manual) company hint so the two companies are always separated
-  // correctly, even if a file is uploaded under the wrong company.
-  const resolvedCompany = companyFromFormat(format) ?? company
-
-  if (format === 'duhalle-oxatis') {
-    const { orders, errors: parseErrors } = parseDuhalleOxatis(text, resolvedCompany, transporter)
-    return { orders, disputes: [], errors: [...errors, ...parseErrors], format }
-  }
-
-  const { orders, errors: parseErrors } = parseJocondienne(text, resolvedCompany, transporter)
-  return { orders, disputes: [], errors: [...errors, ...parseErrors], format }
+  return parsePdfTextContent(text, company, transporter)
 }

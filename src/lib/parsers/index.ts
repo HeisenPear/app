@@ -7,5 +7,14 @@ export type { ParsedExcelResult } from './excel'
 export { parseZip } from './zip'
 export type { ParsedZipResult } from './zip'
 
-export { parsePDF, extractPdfText, detectPdfFormat, companyFromFormat } from './pdf'
+export {
+  parsePDF,
+  extractPdfText,
+  detectPdfFormat,
+  companyFromFormat,
+  detectCompanyFromText,
+  parsePdfTextContent,
+  parsePrestashopOrder,
+  PDF_NO_TEXT_ERROR,
+} from './pdf'
 export type { ParsedPDFResult, PdfFormat } from './pdf'
