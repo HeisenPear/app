@@ -3,10 +3,14 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { FileText, Download, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
+import JSZip from 'jszip'
 import { useAppStore } from '@/store'
 import FileDropZone from '@/components/FileDropZone'
 import { calculateStats } from '@/lib/processors/stats'
 import type { UploadedFile, Order, Dispute, Company, Transporter, ProcessedData, CompanyReport } from '@/lib/types'
+
+/** Files larger than this are extracted client-side if they are ZIPs. */
+const MAX_DIRECT_BYTES = 4 * 1024 * 1024 // 4 MB
 
 function resolvePeriod(orders: Order[]): string {
   if (orders.length === 0) return ''
@@ -47,6 +51,51 @@ function mergeResults(results: Array<ProcessedData & { errors?: string[] }>): {
   }
 }
 
+/**
+ * Expand a single UploadedFile into one or more sendable units.
+ *
+ * Large ZIP files are extracted client-side so that each contained file is
+ * sent as a separate request — keeping every request under Vercel's 4.5 MB
+ * serverless-function body limit, regardless of the archive's total size.
+ */
+async function expandUploadedFile(uf: UploadedFile): Promise<UploadedFile[]> {
+  const ext = uf.file.name.toLowerCase().split('.').pop()
+
+  if (uf.file.size <= MAX_DIRECT_BYTES || ext !== 'zip') {
+    return [uf]
+  }
+
+  // Extract ZIP in the browser and emit one entry per contained file
+  const arrayBuffer = await uf.file.arrayBuffer()
+  const zip = await JSZip.loadAsync(arrayBuffer)
+  const results: UploadedFile[] = []
+
+  for (const [path, entry] of Object.entries(zip.files)) {
+    if (entry.dir) continue
+    const base = path.split('/').pop() || path
+    if (path.startsWith('__MACOSX/') || base.startsWith('._') || base === '.DS_Store') continue
+
+    const lower = base.toLowerCase()
+    const fileExt = lower.split('.').pop()
+    if (!['csv', 'xlsx', 'xls', 'pdf'].includes(fileExt ?? '')) continue
+
+    const blob = await entry.async('blob')
+    const file = new File([blob], base, { type: blob.type || 'application/octet-stream' })
+
+    // Mirror the transporter-from-filename logic used by the server-side ZIP parser
+    let fileTransporter = uf.transporter
+    if (!fileTransporter) {
+      if (lower.includes('colissimo') || lower.includes('colis')) fileTransporter = 'colissimo'
+      else if (lower.includes('dpd')) fileTransporter = 'dpd'
+      else if (lower.includes('geodis') || lower.includes('geo')) fileTransporter = 'geodis'
+    }
+
+    results.push({ id: `${uf.id}-${base}`, file, company: uf.company, fileType: uf.fileType, transporter: fileTransporter, status: 'pending' })
+  }
+
+  return results
+}
+
 export default function UploadPage() {
   const router = useRouter()
   const { setProcessedData, setIsProcessing, setIsExporting, isProcessing, isExporting, processedData } = useAppStore()
@@ -76,12 +125,17 @@ export default function UploadPage() {
     setPersistWarning(null)
 
     try {
-      // Process each file individually to stay under Vercel's 4.5 MB request limit,
-      // then merge all results client-side.
+      // Expand large ZIPs client-side so every server request stays under 4.5 MB.
+      const expandedFiles: UploadedFile[] = []
+      for (const uf of uploadedFiles) {
+        const expanded = await expandUploadedFile(uf)
+        expandedFiles.push(...expanded)
+      }
+
       const fileResults: Array<ProcessedData & { errors?: string[] }> = []
       const fileErrors: string[] = []
 
-      for (const uf of uploadedFiles) {
+      for (const uf of expandedFiles) {
         const formData = new FormData()
         formData.append('files', uf.file)
         formData.append(`company_${uf.file.name}`, uf.company)
