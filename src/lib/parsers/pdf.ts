@@ -197,7 +197,11 @@ export function parseDuhalleOxatis(
       const totalMatch = block.match(/Montant Total TTC\s*([0-9][0-9\s.,]*)\s*€/)
       const totalTTC = totalMatch ? parseFrAmount(totalMatch[1]) : 0
 
-      // Shipping cost: located between "Frais de port TTC" and "Montant Total TTC"
+      // Shipping cost: located between "Frais de port TTC" and "Montant Total TTC".
+      // Take the FIRST amount — subsequent amounts in that segment are breakdowns
+      // (e.g. "dont TVA 1,15 €") that must not be mistaken for the total port cost.
+      // Use [0-9 .,]* (literal space) not \s to avoid spanning across newlines and
+      // accidentally merging adjacent numbers from different lines.
       let shippingCost = 0
       const fpIdx = block.indexOf('Frais de port TTC')
       const mtIdx = block.indexOf('Montant Total TTC')
@@ -206,10 +210,10 @@ export function parseDuhalleOxatis(
         if (/gratuit|offert/i.test(segment)) {
           shippingCost = 0
         } else {
-          const amounts = [...segment.matchAll(/([0-9][0-9\s.,]*)\s*€/g)].map((m) =>
+          const amounts = [...segment.matchAll(/([0-9][0-9 .,]*)\s*€/g)].map((m) =>
             parseFrAmount(m[1])
           )
-          shippingCost = amounts.length ? amounts[amounts.length - 1] : 0
+          shippingCost = amounts.length ? amounts[0] : 0
         }
       }
 
@@ -260,11 +264,11 @@ export function parseJocondienne(
       const end = i + 1 < anchors.length ? anchors[i + 1].idx : text.length
       const block = text.slice(anchor.idx, end)
 
-      const shipMatch = block.match(/Frais de livraison\s+([0-9][0-9\s.,]*)\s*€/i)
+      const shipMatch = block.match(/Frais de livraison\s+([0-9][0-9 .,]*)\s*€/i)
       const shippingCost = shipMatch ? parseFrAmount(shipMatch[1]) : 0
 
       // The final standalone "Total X €" line is the TTC amount
-      const totalMatches = [...block.matchAll(/Total\s+([0-9][0-9\s.,]*)\s*€/gi)]
+      const totalMatches = [...block.matchAll(/Total\s+([0-9][0-9 .,]*)\s*€/gi)]
       const totalTTC = totalMatches.length
         ? parseFrAmount(totalMatches[totalMatches.length - 1][1])
         : 0
@@ -329,27 +333,39 @@ export function parsePrestashopOrder(
     const dateMatch = text.match(/(\d{2})\/(\d{2})\/(\d{4})/)
     const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : ''
 
-    // Shipping cost. OCR flattens tables row-by-row, so labels and values are
-    // NOT adjacent. The carrier row ("Colissimo … 0.100 Kg 5,26 € <tracking>")
-    // keeps the carrier and the shipping amount on one line, which is the most
-    // reliable anchor; the others are fallbacks.
+    // Shipping cost detection — priority order from most specific to least.
+    // Use [0-9 .,]* (literal space, not \s) in capture groups to avoid crossing
+    // newlines and merging adjacent numbers from different columns.
+    //
+    // The carrier-name regex is intentionally LAST because it grabs the FIRST
+    // € amount after the carrier name, which could be a product total when the
+    // OCR merges multiple columns onto one pseudo-line.
     const shippingCost =
+      // 1. "Total frais de port (TTC)" — most explicit
+      firstAmount(text, /total\s+frais\s+de\s+port[^€\n]{0,40}?([\d][\d .,]*)\s*€/i) ??
+      // 2. "Frais d'expédition" / "Frais d'expedition"
+      firstAmount(text, /frais\s+d['']exp[ée]dition[^€\n]{0,20}?([\d][\d .,]*)\s*€/i) ??
+      // 3. Generic "frais de port"
+      firstAmount(text, /frais\s+de\s+port[^€\n]{0,40}?([\d][\d .,]*)\s*€/i) ??
+      // 4. Weight line: "0,100 kg 5,26 €" — amount immediately after weight unit
+      firstAmount(text, /\bkg[^€\n]{0,30}?([\d][\d .,]*)\s*€/i) ??
+      // 5. Summary line: "Livraison 5,26 €"
+      firstAmount(text, /livraison\s+([\d][\d .,]*)\s*€/i) ??
+      // 6. Carrier name line (last resort — may pick wrong amount if other €
+      //    values appear earlier on the same OCR line)
       firstAmount(
         text,
-        /(?:colissimo|dpd|predict|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?([\d][\d\s.,]*)\s*€/i
+        /(?:colissimo|dpd|predict|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?([\d][\d .,]*)\s*€/i
       ) ??
-      firstAmount(text, /\bkg\s+([\d][\d\s.,]*)\s*€/i) ??
-      firstAmount(text, /frais\s+de\s+port[^€]{0,40}?([\d][\d\s.,]*)\s*€/i) ??
-      firstAmount(text, /livraison\s+([\d][\d\s.,]*)\s*€/i) ??
       0
 
     // Total TTC — the Documents table keeps "Facture #FA… 8,81 €" on one row.
     // Fallback to the largest amount on the page (the order total is the max).
     let totalTTC: number | null =
-      firstAmount(text, /facture\s+#?\s*fa\d+\s+([\d][\d\s.,]*)\s*€/i) ??
-      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+([\d][\d\s.,]*)\s*€/i)
+      firstAmount(text, /facture\s+#?\s*fa\d+\s+([\d][\d .,]*)\s*€/i) ??
+      firstAmount(text, /bon\s+de\s+livraison\s+#?\s*li\d+\s+([\d][\d .,]*)\s*€/i)
     if (totalTTC == null) {
-      const amounts = [...text.matchAll(/([\d][\d\s.,]*)\s*€/g)]
+      const amounts = [...text.matchAll(/([\d][\d .,]*)\s*€/g)]
         .map((m) => parseFrAmount(m[1]))
         .filter((n) => n > 0)
       totalTTC = amounts.length ? Math.max(...amounts) : 0

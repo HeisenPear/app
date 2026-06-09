@@ -77,11 +77,13 @@ export async function parseExcel(
     headers[colNum] = cellValue(cell).toLowerCase().trim()
   })
 
+  // Iterate keywords in priority order first, so a more-specific keyword (e.g.
+  // "frais de port") wins over a generic one (e.g. "frais") even when a column
+  // with the generic term appears earlier in the sheet.
   const findCol = (keywords: string[]): number => {
-    for (const [colStr, header] of Object.entries(headers)) {
-      const col = parseInt(colStr)
-      for (const kw of keywords) {
-        if (header.includes(kw.toLowerCase())) return col
+    for (const kw of keywords) {
+      for (const [colStr, header] of Object.entries(headers)) {
+        if (header.includes(kw.toLowerCase())) return parseInt(colStr)
       }
     }
     return -1
