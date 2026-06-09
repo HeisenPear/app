@@ -162,8 +162,8 @@ export function detectCompanyFromText(text: string): Company | undefined {
 
 function detectTransporterFromText(text: string): Transporter | undefined {
   const lower = text.toLowerCase()
-  // Predict is a DPD France delivery service
-  if (lower.includes('predict') || lower.includes('dpd')) return 'dpd'
+  // Predict and Pickup (relais Pickup) are DPD France services
+  if (lower.includes('predict') || lower.includes('dpd') || lower.includes('pickup')) return 'dpd'
   if (lower.includes('geodis')) return 'geodis'
   if (lower.includes('colissimo')) return 'colissimo'
   return undefined
@@ -341,28 +341,35 @@ export function parsePrestashopOrder(
     const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : ''
 
     // Shipping cost detection — priority order from most specific to least.
-    // Use [0-9 .,]* (literal space, not \s) in capture groups to avoid crossing
-    // newlines and merging adjacent numbers from different columns.
     //
-    // The carrier-name regex is intentionally LAST because it grabs the FIRST
-    // € amount after the carrier name, which could be a product total when the
-    // OCR merges multiple columns onto one pseudo-line.
+    // Key constraints used throughout:
+    //   • [^€]{0,N}?  — lazy, crosses newlines but stops at any € sign, so it
+    //     always finds the FIRST € amount after the label without skipping over
+    //     earlier prices.
+    //   • (\d[\d]*[,. ]\d{2})  — "strict monetary" capture: requires a decimal
+    //     separator (comma, dot, or space) followed by exactly 2 digits. This
+    //     rejects OCR artifacts like "7A1" (Tesseract reading "," as "A") or
+    //     bare single digits, while accepting "5,26" / "7 41" / "37.00".
+    //
+    // The carrier-name pattern is intentionally LAST because it may match
+    // a product total that appears before the shipping amount on the same line.
     const shippingCost =
-      // 1. "Total frais de port (TTC)" — most explicit
-      firstAmount(text, /total\s+frais\s+de\s+port[^€\n]{0,40}?([\d][\d .,]*)\s*€/i) ??
-      // 2. "Frais d'expédition" / "Frais d'expedition"
-      firstAmount(text, /frais\s+d['']exp[ée]dition[^€\n]{0,20}?([\d][\d .,]*)\s*€/i) ??
-      // 3. Generic "frais de port"
-      firstAmount(text, /frais\s+de\s+port[^€\n]{0,40}?([\d][\d .,]*)\s*€/i) ??
-      // 4. Weight line: "0,100 kg 5,26 €" — amount immediately after weight unit
-      firstAmount(text, /\bkg[^€\n]{0,30}?([\d][\d .,]*)\s*€/i) ??
-      // 5. Summary line: "Livraison 5,26 €"
+      // 1. "Total frais de port (TTC) : 5,26 €"  — same line or next line
+      firstAmount(text, /total\s+frais\s+de\s+port[^€]{0,60}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
+      // 2. "Frais d'expédition" table header → carrier row → amount
+      //    May span 2 lines: header\ndate carrier\namount  (up to ~120 chars)
+      firstAmount(text, /frais\s+d['']exp[ée]dition[^€]{0,120}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
+      // 3. Generic "frais de port" anywhere (covers Colissimo slip labels)
+      firstAmount(text, /frais\s+de\s+port[^€]{0,60}?(\d[\d]*[,. ]\d{2})\s*€/i) ??
+      // 4. Weight line: whitespace-only gap between "kg" and the amount
+      //    Strict: rejects "Kg 7A1€" (OCR artifact) because "A" is not in [\d ,.]
+      firstAmount(text, /\bkg\s+(\d[\d]*[,. ]\d{2})\s*€/i) ??
+      // 5. Summary column "Livraison\n7,41€" or "Livraison 5,26€"
       firstAmount(text, /livraison\s+([\d][\d .,]*)\s*€/i) ??
-      // 6. Carrier name line (last resort — may pick wrong amount if other €
-      //    values appear earlier on the same OCR line)
+      // 6. Carrier name line (last resort)
       firstAmount(
         text,
-        /(?:colissimo|dpd|predict|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?([\d][\d .,]*)\s*€/i
+        /(?:colissimo|dpd|predict|pickup|geodis|chronopost|mondial\s*relay)[^€\n]{0,80}?(\d[\d]*[,. ]\d{2})\s*€/i
       ) ??
       0
 
