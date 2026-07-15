@@ -1,5 +1,5 @@
 export type Transporter = 'colissimo' | 'dpd' | 'geodis' | 'retrait'
-export type Company = 'duhalle' | 'jocondienne'
+export type Company = 'duhalle' | 'jocondienne' | 'amazon'
 export type FileType = 'commandes' | 'litiges'
 
 export interface Order {
@@ -102,6 +102,7 @@ export interface AppState {
 export const COMPANY_LABELS: Record<Company, string> = {
   duhalle: 'Duhallé Boutique',
   jocondienne: 'La Jocondienne',
+  amazon: 'Amazon',
 }
 
 export const TRANSPORTER_LABELS: Record<Transporter, string> = {

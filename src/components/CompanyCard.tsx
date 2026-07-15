@@ -16,7 +16,7 @@ const TRANSPORTER_COLORS: Record<string, string> = {
 
 export default function CompanyCard({ company, reports }: CompanyCardProps) {
   const label = COMPANY_LABELS[company]
-  const initials = company === 'duhalle' ? 'DB' : 'LJ'
+  const initials = company === 'duhalle' ? 'DB' : company === 'amazon' ? 'AZ' : 'LJ'
 
   const totalOrders = reports.reduce((sum, r) => sum + r.stats.totalOrders, 0)
   const totalFree = reports.reduce((sum, r) => sum + r.stats.freeShippingOrders, 0)

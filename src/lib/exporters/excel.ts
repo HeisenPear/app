@@ -738,7 +738,8 @@ export async function generateExcel(data: ProcessedData): Promise<Buffer> {
   // Per-report sheets
   for (const report of data.reports) {
     const colors = getTransporterColors(report.transporter)
-    const companyShort = report.company === 'duhalle' ? 'DB' : 'LJ'
+    const companyShort =
+      report.company === 'duhalle' ? 'DB' : report.company === 'amazon' ? 'AZ' : 'LJ'
     const transporterShort = report.transporter.toUpperCase().substring(0, 5)
 
     const recapSheetName = `📊 ${companyShort}-${transporterShort}`

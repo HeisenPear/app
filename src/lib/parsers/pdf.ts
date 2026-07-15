@@ -8,7 +8,7 @@ export interface ParsedPDFResult {
   format: PdfFormat
 }
 
-export type PdfFormat = 'duhalle-oxatis' | 'jocondienne' | 'prestashop-order' | 'unknown'
+export type PdfFormat = 'duhalle-oxatis' | 'jocondienne' | 'prestashop-order' | 'amazon' | 'unknown'
 
 const FR_MONTHS: Record<string, string> = {
   janvier: '01',
@@ -101,6 +101,19 @@ export async function extractPdfText(buffer: Buffer | Uint8Array): Promise<strin
  *   - La Jocondienne   → "#FA…" invoices ("Réf. de commande", "Frais de livraison").
  */
 export function detectPdfFormat(text: string): PdfFormat {
+  // Amazon Marketplace packing slips (vectorised → reached via OCR). One order
+  // per page, many pages per file. Checked FIRST because the seller name
+  // "La Jocondienne" also appears on them and would otherwise misroute the file
+  // to the Jocondienne parser. Markers are highly distinctive to Amazon.
+  const isAmazon =
+    /sellercentral\.amazon/i.test(text) ||
+    /Amazon\s*Marketplace/i.test(text) ||
+    (/amazon/i.test(text) &&
+      (/Num[ée]ro de la commande\s*:/i.test(text) ||
+        /Nom du vendeur/i.test(text) ||
+        /Total de l['']exp[ée]dition/i.test(text)))
+  if (isAmazon) return 'amazon'
+
   const hasCommande = /Commande\s*#?\s*\d+/i.test(text)
 
   // PrestaShop order-detail page (text is rasterized as vectors → reached via
@@ -156,11 +169,15 @@ export function companyFromFormat(format: PdfFormat): Company | undefined {
   if (format === 'duhalle-oxatis') return 'duhalle'
   if (format === 'jocondienne') return 'jocondienne'
   if (format === 'prestashop-order') return 'jocondienne'
+  if (format === 'amazon') return 'amazon'
   return undefined
 }
 
 /** Infer the company from explicit name markers anywhere in the text. */
 export function detectCompanyFromText(text: string): Company | undefined {
+  // Amazon first: its slips also carry the seller name ("La Jocondienne"), so
+  // the marketplace signal must take precedence.
+  if (/sellercentral\.amazon/i.test(text) || /Amazon\s*Marketplace/i.test(text)) return 'amazon'
   if (/jocondienne/i.test(text)) return 'jocondienne'
   if (/duhall/i.test(text)) return 'duhalle'
   return undefined
@@ -345,6 +362,113 @@ function maxStrictAmount(text: string): number {
   return amounts.length ? Math.max(...amounts) : 0
 }
 
+/** Sum group-1 of every match of `re` (global). Returns null if none matched. */
+function sumAmounts(text: string, re: RegExp): number | null {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+  const values = [...text.matchAll(g)].map((m) => parseFrAmount(m[1]))
+  if (!values.length) return null
+  return Math.round(values.reduce((a, b) => a + b, 0) * 100) / 100
+}
+
+/**
+ * Parse Amazon Marketplace packing slips (reached via OCR — the pages are
+ * rasterised). ONE order per page, MANY pages per file, so the concatenated OCR
+ * text holds many orders; we split on the "Numéro de la commande" header.
+ *
+ * Business rules (per the client):
+ *   • Prices are already TTC — take them as printed, no VAT maths.
+ *   • Shipping = the LEFT column of the "Total de l'expédition" row (the amount
+ *     charged). The RIGHT column ("TVA comprise") is the VAT already included in
+ *     it and must be ignored.
+ *   • The only carrier on Amazon is DPD.
+ *
+ * Layout (one page):
+ *   "Numéro de la commande : 407-3058911-3981121"
+ *   "Date de commande : lun. 1 juin 2026"
+ *   "Sous-total de l'article   6,49 €  1,08 €"
+ *   "Total de l'expédition     9,64 €  1,61 €"   ← 9,64 = shipping (left column)
+ *   "Total de l'article       16,13 €  2,69 €"
+ *   "Total: 16,13 €"                              ← order total TTC
+ */
+export function parseAmazonOrder(
+  text: string,
+  company: Company
+): { orders: Order[]; errors: string[] } {
+  const orders: Order[] = []
+  const errors: string[] = []
+
+  // Split into per-order blocks on the order-number header.
+  const blocks = text.split(/Num[ée]ro de la commande\s*:/i).slice(1)
+
+  blocks.forEach((block, idx) => {
+    try {
+      // Amazon order id: "407-3058911-3981121"
+      const idMatch = block.match(/(\d{3}-\d{7}-\d{7})/)
+      if (!idMatch) return
+      const id = idMatch[1]
+
+      // Order date: "Date de commande : lun. 1 juin 2026" (day-of-week optional).
+      // Anchor on the label, skip the non-numeric weekday, capture "1 juin 2026".
+      const dateMatch =
+        block.match(
+          /Date de commande[^\d]{0,40}(\d{1,2}\s+[A-Za-zÀ-ÿ]+\s+\d{4})/i
+        ) || block.match(/(\d{1,2}\s+[A-Za-zÀ-ÿ]+\s+\d{4})/)
+      const date = dateMatch ? frenchDateToISO(dateMatch[1]) : ''
+
+      // Article subtotal (left column). Summed in case of a multi-shipment order.
+      const subTotal = sumAmounts(
+        block,
+        /Sous-?total de l['']article\s+(\d[\d ]*[,.]\d{2})\s*€/i
+      )
+
+      // Shipping = LEFT column of EVERY "Total de l'expédition" row, summed.
+      // The right column ("TVA comprise") is ignored by capturing only the first
+      // amount after each label. Some Amazon orders split into several shipments,
+      // each with its own expédition line — the order's shipping is their sum.
+      let shippingCost = sumAmounts(
+        block,
+        /Total de l['']exp[ée]dition\s+(\d[\d ]*[,.]\d{2})\s*€/i
+      )
+
+      // Order total TTC — the standalone "Total: 16,13 €" line (grand total).
+      // Fallbacks handle OCR loss and multi-shipment slips (sum of article rows).
+      const totalTTC =
+        firstAmount(block, /Total\s*[:.]\s*(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        sumAmounts(block, /Total de l['']article\s+(\d[\d ]*[,.]\d{2})\s*€/i) ??
+        (subTotal != null && shippingCost != null ? subTotal + shippingCost : null) ??
+        maxStrictAmount(block)
+
+      // Fallback for shipping when the label rows were garbled by OCR:
+      // total − article subtotal (Amazon always shows Total = article + port).
+      if (shippingCost == null) {
+        shippingCost =
+          subTotal != null && totalTTC > 0
+            ? Math.max(0, Math.round((totalTTC - subTotal) * 100) / 100)
+            : 0
+      }
+
+      // Amazon "Service de livraison : Standard" → human-readable mode.
+      const modeMatch = block.match(/Service de livraison\s*:?\s*([A-Za-zÀ-ÿ]+)/i)
+      const deliveryMode = modeMatch ? `Amazon ${modeMatch[1].trim()}` : 'Amazon DPD'
+
+      orders.push({
+        id: id.trim(),
+        date,
+        company,
+        // The only carrier on Amazon is DPD.
+        transporter: 'dpd',
+        totalTTC,
+        shippingCost,
+        deliveryMode,
+      })
+    } catch (err) {
+      errors.push(`Commande Amazon ${idx + 1} : ${err instanceof Error ? err.message : 'erreur de parsing'}`)
+    }
+  })
+
+  return { orders, errors }
+}
+
 /**
  * Parse a PrestaShop order-detail page (one order per PDF, reached via OCR
  * because the text is rasterized as vector outlines).
@@ -504,7 +628,12 @@ export function parsePdfTextContent(
     if (/Commande\s*#?\s*\d+/i.test(text) && !/Montant Total TTC/i.test(text)) {
       format = 'prestashop-order'
     } else {
-      format = company === 'jocondienne' ? 'jocondienne' : 'duhalle-oxatis'
+      format =
+        company === 'jocondienne'
+          ? 'jocondienne'
+          : company === 'amazon'
+            ? 'amazon'
+            : 'duhalle-oxatis'
     }
   }
 
@@ -512,6 +641,10 @@ export function parsePdfTextContent(
   const resolvedCompany =
     companyFromFormat(format) ?? detectCompanyFromText(text) ?? company
 
+  if (format === 'amazon') {
+    const { orders, errors } = parseAmazonOrder(text, resolvedCompany)
+    return { orders, disputes: [], errors, format }
+  }
   if (format === 'prestashop-order') {
     const { orders, errors } = parsePrestashopOrder(text, resolvedCompany, transporter)
     return { orders, disputes: [], errors, format }

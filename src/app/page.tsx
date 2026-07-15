@@ -144,13 +144,13 @@ export default function DashboardPage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Par entreprise</h2>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {['duhalle', 'jocondienne'].map((company) => {
+              {(['duhalle', 'jocondienne', 'amazon'] as const).map((company) => {
                 const companyReports = processedData.reports.filter(r => r.company === company)
                 if (companyReports.length === 0) return null
                 return (
                   <CompanyCard
                     key={company}
-                    company={company as 'duhalle' | 'jocondienne'}
+                    company={company}
                     reports={companyReports}
                   />
                 )

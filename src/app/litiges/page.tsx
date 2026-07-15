@@ -95,6 +95,7 @@ export default function LitigesPage() {
               <option value="all">Toutes</option>
               <option value="duhalle">{COMPANY_LABELS.duhalle}</option>
               <option value="jocondienne">{COMPANY_LABELS.jocondienne}</option>
+              <option value="amazon">{COMPANY_LABELS.amazon}</option>
             </select>
           </div>
           <div className="flex items-center gap-2">

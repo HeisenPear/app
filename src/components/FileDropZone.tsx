@@ -35,7 +35,7 @@ export default function FileDropZone({ files, onFilesChange }: FileDropZoneProps
       const uploadedFiles: UploadedFile[] = fileArray.map((file) => ({
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         file,
-        company: 'duhalle' as Company,
+        company: guessCompany(file.name),
         fileType: guessFileType(file.name),
         transporter: guessTransporter(file.name),
         status: 'pending' as const,
@@ -143,6 +143,7 @@ export default function FileDropZone({ files, onFilesChange }: FileDropZoneProps
                 >
                   <option value="duhalle">{COMPANY_LABELS.duhalle}</option>
                   <option value="jocondienne">{COMPANY_LABELS.jocondienne}</option>
+                  <option value="amazon">{COMPANY_LABELS.amazon}</option>
                 </select>
 
                 {/* File type */}
@@ -197,6 +198,13 @@ export default function FileDropZone({ files, onFilesChange }: FileDropZoneProps
       )}
     </div>
   )
+}
+
+function guessCompany(filename: string): Company {
+  const lower = filename.toLowerCase()
+  if (lower.includes('amazon')) return 'amazon'
+  if (lower.includes('jocond')) return 'jocondienne'
+  return 'duhalle'
 }
 
 function guessFileType(filename: string): FileType {
