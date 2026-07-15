@@ -68,6 +68,13 @@ export interface OcrCallbacks {
    * OCR'ing every page when the needed fields are already on page 1–2).
    */
   shouldStop?: (accumulatedText: string) => boolean
+  /**
+   * Render scale (pdf.js base is 72 dpi; scale 3 ≈ 216 dpi, scale 2 ≈ 144 dpi).
+   * Higher = more accurate but slower. Defaults to 3 for the small, densely
+   * vectorised PrestaShop fonts; callers can lower it for cleaner layouts
+   * (e.g. Amazon packing slips) to speed up large multi-page files.
+   */
+  scale?: number
 }
 
 /**
@@ -76,7 +83,7 @@ export interface OcrCallbacks {
  */
 export async function ocrPdf(
   bytes: Uint8Array,
-  { onPage, shouldStop }: OcrCallbacks = {}
+  { onPage, shouldStop, scale = 3 }: OcrCallbacks = {}
 ): Promise<string> {
   const doc = await getDocumentProxy(bytes)
   const worker = await getWorker()
@@ -85,11 +92,12 @@ export async function ocrPdf(
 
   for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
     onPage?.(pageNumber, total)
-    // Scale 3 ≈ 216 dpi (pdf.js base = 72 dpi × 3). Tesseract recommends ≥ 300 dpi
-    // for best accuracy; 216 dpi is a pragmatic balance between quality and speed.
-    // Scale 2 (144 dpi) produced too many artefacts: dropped decimal commas,
-    // merged digits, misread symbols (e.g. "," → "A" in vectorised fonts).
-    const canvas = await renderPageToCanvas(doc, pageNumber, 3)
+    // Default scale 3 ≈ 216 dpi (pdf.js base = 72 dpi × 3). Tesseract recommends
+    // ≥ 300 dpi; 216 dpi balances quality and speed. Scale 2 (144 dpi) produced
+    // too many artefacts on the small, densely vectorised PrestaShop fonts
+    // (dropped decimal commas, merged digits, "," → "A"). Callers may lower the
+    // scale for cleaner layouts (Amazon) to speed up large multi-page files.
+    const canvas = await renderPageToCanvas(doc, pageNumber, scale)
     try {
       const { data } = await worker.recognize(canvas)
       accumulated += '\n' + (data.text || '')

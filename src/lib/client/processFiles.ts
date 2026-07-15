@@ -1,7 +1,7 @@
 import JSZip from 'jszip'
 import { parseCSV } from '../parsers/csv'
 import { parseExcel } from '../parsers/excel'
-import { parsePDF, parsePdfTextContent, PDF_NO_TEXT_ERROR } from '../parsers/pdf'
+import { parsePDF, parsePdfTextContent } from '../parsers/pdf'
 import { ocrPdf, terminateOcr } from './ocr'
 import { processOrders } from '../processors/orders'
 import { processDisputes } from '../processors/disputes'
@@ -147,15 +147,25 @@ async function runTask(
 
   // PDF — first try the cheap text path.
   const r = await parsePDF(bytes, task.company, task.transporter)
-  const noText = r.orders.length === 0 && r.errors.some((e) => e === PDF_NO_TEXT_ERROR)
-  if (!noText) {
+  // Fall back to OCR whenever the text path yielded NO orders. That covers two
+  // cases: a PDF with no text layer at all (PDF_NO_TEXT_ERROR), and — crucially —
+  // a PDF whose text layer only exposes useless "chrome" while the real content
+  // is vectorised. Amazon packing slips are the latter: unpdf extracts just the
+  // repeated page header ("Amazon https://sellercentral.amazon.fr/… N sur 100")
+  // and none of the order data, so the text parse finds 0 orders without error.
+  if (r.orders.length > 0) {
     return { orders: r.orders, disputes: r.disputes, errors: r.errors }
   }
 
-  // No extractable text → OCR fallback (renders pages + Tesseract, all local).
+  // No usable text → OCR fallback (renders pages + Tesseract, all local).
+  // Amazon slips have large, clean text — scale 2 is enough and ~2× faster,
+  // which matters for their 100-orders-per-file size. Everything else uses the
+  // higher default scale for the small vectorised PrestaShop fonts.
+  const ocrScale = r.format === 'amazon' ? 2 : 3
   try {
     const text = await ocrPdf(bytes, {
       onPage: onOcrPage,
+      scale: ocrScale,
       // Stop as soon as we have id + date + a positive total AND we have seen the
       // authoritative "Transporteurs" table (which carries the real carrier +
       // shipping). This is typically page 2, so we avoid OCR'ing later pages.
