@@ -104,8 +104,8 @@ export async function ocrPdf(
 
   // Recycle the worker every N pages to cap the Tesseract WASM heap (see
   // recycleWorker). Chosen well above a typical single invoice so small files
-  // never pay the cost, but low enough to keep large batches bounded.
-  const RECYCLE_EVERY = 30
+  // never pay the cost, but low enough to keep large multi-file batches bounded.
+  const RECYCLE_EVERY = 20
 
   for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
     onPage?.(pageNumber, total)
