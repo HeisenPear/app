@@ -451,6 +451,19 @@ export function parseAmazonOrder(
       const modeMatch = block.match(/Service de livraison\s*:?\s*([A-Za-zÀ-ÿ]+)/i)
       const deliveryMode = modeMatch ? `Amazon ${modeMatch[1].trim()}` : 'Amazon DPD'
 
+      // Address signature (postal code + buyer name) — a tie-breaker only. Two
+      // records that share an order id but ship to different addresses are kept
+      // as distinct orders downstream, because the id was almost certainly
+      // mis-read by OCR on one of them. `\b\d{5}\b` picks the postal code without
+      // matching the 3-/7-digit groups of the order number.
+      const postal = (block.match(/\b\d{5}\b/) || [''])[0]
+      const buyerMatch = block.match(
+        /Nom de l['']acheteur\s*:?\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .-]{1,30})/i
+      )
+      const buyer = buyerMatch ? buyerMatch[1].trim() : ''
+      const shipAddress =
+        postal || buyer ? `${postal} ${buyer}`.replace(/\s+/g, ' ').trim().toUpperCase() : undefined
+
       orders.push({
         id: id.trim(),
         date,
@@ -460,6 +473,7 @@ export function parseAmazonOrder(
         totalTTC,
         shippingCost,
         deliveryMode,
+        shipAddress,
       })
     } catch (err) {
       errors.push(`Commande Amazon ${idx + 1} : ${err instanceof Error ? err.message : 'erreur de parsing'}`)

@@ -10,6 +10,12 @@ export interface Order {
   totalTTC: number
   shippingCost: number
   deliveryMode: string
+  /**
+   * Shipping/recipient address signature (name + postal code), when available.
+   * Used only as a tie-breaker: two orders sharing an id but with different
+   * addresses are kept distinct (the id was almost certainly mis-read by OCR).
+   */
+  shipAddress?: string
   dispute?: Dispute
 }
 
