@@ -90,7 +90,13 @@ export default function FileDropZone({ files, onFilesChange }: FileDropZoneProps
           id="file-input"
           type="file"
           multiple
-          accept=".csv,.xlsx,.xls,.pdf,.zip"
+          // Include the ZIP MIME types (and octet-stream) alongside the
+          // extensions: several browsers/phones report .zip as
+          // application/x-zip-compressed or application/octet-stream and would
+          // otherwise grey the file out in the picker. The real gate is the
+          // extension check in processFiles, so widening this only affects what
+          // the OS dialog lets the user pick.
+          accept=".csv,.xlsx,.xls,.pdf,.zip,application/zip,application/x-zip-compressed,application/x-zip,multipart/x-zip,application/octet-stream"
           className="hidden"
           onChange={handleFileInput}
         />
