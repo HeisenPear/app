@@ -249,11 +249,17 @@ export function parseDuhalleOxatis(
       const totalMatch = block.match(/Montant Total TTC\s*([0-9][0-9\s.,]*)\s*€/)
       const totalTTC = totalMatch ? parseFrAmount(totalMatch[1]) : 0
 
-      // Shipping cost: located between "Frais de port TTC" and "Montant Total TTC".
-      // Take the FIRST amount — subsequent amounts in that segment are breakdowns
-      // (e.g. "dont TVA 1,15 €") that must not be mistaken for the total port cost.
-      // Use [0-9 .,]* (literal space) not \s to avoid spanning across newlines and
-      // accidentally merging adjacent numbers from different lines.
+      // Shipping cost: the value in the column to the right of "Frais de port TTC",
+      // located between that label and "Montant Total TTC". Take the FIRST amount —
+      // subsequent amounts in that segment are breakdowns (e.g. "dont TVA 1,15 €").
+      //
+      // The delivery-mode label sits between "Frais de port TTC" and the amount,
+      // and some modes END with a digit — e.g. "DPD Predict à domicile EURO 1".
+      // Because pdf.js joins items with spaces, that trailing "1" would merge with
+      // the amount ("EURO 1 14,78 €" → "1 14,78" → 1,14 €), corrupting the table.
+      // A strict monetary pattern fixes this: the integer part may only contain a
+      // space/dot as a THOUSANDS separator (groups of exactly 3 digits), so the
+      // stray "1 " is rejected and "14,78" is read correctly.
       let shippingCost = 0
       const fpIdx = block.indexOf('Frais de port TTC')
       const mtIdx = block.indexOf('Montant Total TTC')
@@ -262,9 +268,9 @@ export function parseDuhalleOxatis(
         if (/gratuit|offert/i.test(segment)) {
           shippingCost = 0
         } else {
-          const amounts = [...segment.matchAll(/([0-9][0-9 .,]*)\s*€/g)].map((m) =>
-            parseFrAmount(m[1])
-          )
+          const amounts = [
+            ...segment.matchAll(/(\d{1,3}(?:[ .]\d{3})*,\d{2})\s*€/g),
+          ].map((m) => parseFrAmount(m[1]))
           shippingCost = amounts.length ? amounts[0] : 0
         }
       }
