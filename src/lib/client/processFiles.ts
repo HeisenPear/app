@@ -244,6 +244,9 @@ export async function processFilesLocally(
   const allOrders: Order[] = []
   const allDisputes: Dispute[] = []
   const warnings: string[] = []
+  // Per-file order count, so the user can see every file WAS read (and spot
+  // overlapping files that later collapse during de-duplication).
+  const perFile: Array<{ name: string; count: number }> = []
 
   try {
     for (let i = 0; i < tasks.length; i++) {
@@ -262,10 +265,12 @@ export async function processFilesLocally(
         })
         allOrders.push(...result.orders)
         allDisputes.push(...result.disputes)
+        perFile.push({ name: task.name, count: result.orders.length })
         if (result.errors.length) {
           warnings.push(...result.errors.map((e) => `[${task.name}] ${e}`))
         }
       } catch (err) {
+        perFile.push({ name: task.name, count: 0 })
         warnings.push(`[${task.name}] ${err instanceof Error ? err.message : 'Erreur de traitement'}`)
       }
 
@@ -280,8 +285,29 @@ export async function processFilesLocally(
   onProgress({ phase: 'finalizing', current: '', done: total, total })
 
   // Normalize, dedupe, link disputes, group, compute stats — all pure functions.
+  const rawOrderCount = allOrders.length
   const processedOrders = processOrders(allOrders)
   const processedDisputes = processDisputes(allDisputes, processedOrders)
+
+  // Transparency: when several files are imported, report how many orders each
+  // contributed and how many duplicates were merged. Overlapping exports (e.g.
+  // two Amazon files that share orders) otherwise look like "only one file was
+  // read" because de-duplication silently collapses the shared orders.
+  if (perFile.length > 1) {
+    const duplicates = rawOrderCount - processedOrders.length
+    const breakdown = perFile.map((f) => `${f.name} : ${f.count}`).join(' • ')
+    if (duplicates > 0) {
+      warnings.push(
+        `ℹ️ ${perFile.length} fichiers lus (${breakdown}). ` +
+          `${rawOrderCount} commandes au total dont ${duplicates} en double entre fichiers ` +
+          `(fusionnées) → ${processedOrders.length} commandes uniques.`
+      )
+    } else {
+      warnings.push(
+        `ℹ️ ${perFile.length} fichiers lus (${breakdown}) → ${processedOrders.length} commandes uniques.`
+      )
+    }
+  }
 
   const groupMap = new Map<string, { orders: Order[]; disputes: Dispute[] }>()
   for (const order of processedOrders) {
