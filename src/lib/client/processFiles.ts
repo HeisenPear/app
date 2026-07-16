@@ -162,13 +162,18 @@ async function runTask(
   // which matters for their 100-orders-per-file size. Everything else uses the
   // higher default scale for the small vectorised PrestaShop fonts.
   const ocrScale = r.format === 'amazon' ? 2 : 3
-  try {
-    const text = await ocrPdf(bytes, {
+  const attemptOcr = async () => {
+    // Read a FRESH copy of the bytes for every attempt: pdf.js may detach
+    // (transfer) the input ArrayBuffer while loading, which would make a reused
+    // buffer come back empty on the retry below.
+    const freshBytes = await task.getBytes()
+    const text = await ocrPdf(freshBytes, {
       onPage: onOcrPage,
       scale: ocrScale,
       // Stop as soon as we have id + date + a positive total AND we have seen the
       // authoritative "Transporteurs" table (which carries the real carrier +
       // shipping). This is typically page 2, so we avoid OCR'ing later pages.
+      // Multi-order files (Amazon) never match this, so every page is read.
       shouldStop: (acc) => {
         const probe = parsePdfTextContent(acc, task.company, task.transporter)
         const o = probe.orders[0]
@@ -177,16 +182,28 @@ async function runTask(
         )
       },
     })
-
-    if (!text.trim()) {
-      return { orders: [], disputes: [], errors: ['OCR : aucun texte reconnu.'], usedOcr: true }
-    }
-
+    if (!text.trim()) return { orders: [], disputes: [], errors: [] as string[] }
     const parsed = parsePdfTextContent(text, task.company, task.transporter)
+    return { orders: parsed.orders, disputes: parsed.disputes, errors: parsed.errors }
+  }
+
+  try {
+    let res = await attemptOcr()
+    // Safety net: a PDF that reached the OCR path but yields ZERO orders almost
+    // always means the OCR degraded rather than the file being empty — most
+    // often Tesseract returning blank text under memory pressure on a later file
+    // in a multi-file batch. Reset the worker to a clean state and retry once.
+    if (res.orders.length === 0) {
+      await terminateOcr()
+      res = await attemptOcr()
+    }
     return {
-      orders: parsed.orders,
-      disputes: parsed.disputes,
-      errors: parsed.orders.length === 0 ? [...parsed.errors, 'OCR : données non reconnues dans le texte.'] : parsed.errors,
+      orders: res.orders,
+      disputes: res.disputes,
+      errors:
+        res.orders.length === 0
+          ? [...res.errors, 'OCR : données non reconnues dans le texte.']
+          : res.errors,
       usedOcr: true,
     }
   } catch (err) {

@@ -69,6 +69,13 @@ async function renderPageToCanvas(
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Canvas 2D non disponible')
   await page.render({ canvasContext: context, viewport, canvas }).promise
+  // Release the page's internal render caches so memory doesn't accumulate
+  // across a long multi-page document.
+  try {
+    page.cleanup()
+  } catch {
+    /* ignore */
+  }
   return canvas
 }
 
@@ -107,27 +114,37 @@ export async function ocrPdf(
   // never pay the cost, but low enough to keep large multi-file batches bounded.
   const RECYCLE_EVERY = 20
 
-  for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
-    onPage?.(pageNumber, total)
-    if (pageNumber > 1 && pageNumber % RECYCLE_EVERY === 1) {
-      await recycleWorker()
-      worker = await getWorker()
-    }
+  try {
+    for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
+      onPage?.(pageNumber, total)
+      if (pageNumber > 1 && pageNumber % RECYCLE_EVERY === 1) {
+        await recycleWorker()
+        worker = await getWorker()
+      }
     // Default scale 3 ≈ 216 dpi (pdf.js base = 72 dpi × 3). Tesseract recommends
     // ≥ 300 dpi; 216 dpi balances quality and speed. Scale 2 (144 dpi) produced
     // too many artefacts on the small, densely vectorised PrestaShop fonts
     // (dropped decimal commas, merged digits, "," → "A"). Callers may lower the
     // scale for cleaner layouts (Amazon) to speed up large multi-page files.
-    const canvas = await renderPageToCanvas(doc, pageNumber, scale)
-    try {
-      const { data } = await worker.recognize(canvas)
-      accumulated += '\n' + (data.text || '')
-    } finally {
-      // Free the canvas backing store promptly.
-      canvas.width = 0
-      canvas.height = 0
+      const canvas = await renderPageToCanvas(doc, pageNumber, scale)
+      try {
+        const { data } = await worker.recognize(canvas)
+        accumulated += '\n' + (data.text || '')
+      } finally {
+        // Free the canvas backing store promptly.
+        canvas.width = 0
+        canvas.height = 0
+      }
+      if (shouldStop?.(accumulated)) break
     }
-    if (shouldStop?.(accumulated)) break
+  } finally {
+    // Destroy the pdf.js document so its decoded pages are released before the
+    // next file loads — otherwise memory accumulates across a multi-file batch.
+    try {
+      await doc.destroy()
+    } catch {
+      /* ignore */
+    }
   }
 
   return accumulated
