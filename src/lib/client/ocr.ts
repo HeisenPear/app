@@ -42,6 +42,18 @@ export async function terminateOcr(): Promise<void> {
   }
 }
 
+/**
+ * Recycle the worker to release the accumulated WebAssembly heap. Tesseract's
+ * heap only ever grows across `recognize()` calls; over hundreds of pages (e.g.
+ * several 100-page Amazon files in one batch) it can exhaust the tab's memory
+ * and make later files silently fail. Terminating and recreating the worker
+ * resets the heap; the language data is cached, so re-creation is cheap.
+ */
+async function recycleWorker(): Promise<void> {
+  await terminateOcr()
+  await getWorker()
+}
+
 /** Render one PDF page to a canvas at the given scale (higher = better OCR). */
 async function renderPageToCanvas(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -86,12 +98,21 @@ export async function ocrPdf(
   { onPage, shouldStop, scale = 3 }: OcrCallbacks = {}
 ): Promise<string> {
   const doc = await getDocumentProxy(bytes)
-  const worker = await getWorker()
+  let worker = await getWorker()
   const total: number = doc.numPages
   let accumulated = ''
 
+  // Recycle the worker every N pages to cap the Tesseract WASM heap (see
+  // recycleWorker). Chosen well above a typical single invoice so small files
+  // never pay the cost, but low enough to keep large batches bounded.
+  const RECYCLE_EVERY = 30
+
   for (let pageNumber = 1; pageNumber <= total; pageNumber++) {
     onPage?.(pageNumber, total)
+    if (pageNumber > 1 && pageNumber % RECYCLE_EVERY === 1) {
+      await recycleWorker()
+      worker = await getWorker()
+    }
     // Default scale 3 ≈ 216 dpi (pdf.js base = 72 dpi × 3). Tesseract recommends
     // ≥ 300 dpi; 216 dpi balances quality and speed. Scale 2 (144 dpi) produced
     // too many artefacts on the small, densely vectorised PrestaShop fonts
