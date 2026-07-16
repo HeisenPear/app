@@ -451,18 +451,15 @@ export function parseAmazonOrder(
       const modeMatch = block.match(/Service de livraison\s*:?\s*([A-Za-zÀ-ÿ]+)/i)
       const deliveryMode = modeMatch ? `Amazon ${modeMatch[1].trim()}` : 'Amazon DPD'
 
-      // Address signature (postal code + buyer name) — a tie-breaker only. Two
-      // records that share an order id but ship to different addresses are kept
-      // as distinct orders downstream, because the id was almost certainly
-      // mis-read by OCR on one of them. `\b\d{5}\b` picks the postal code without
-      // matching the 3-/7-digit groups of the order number.
+      // Address signature — a tie-breaker only. Two records that share an order
+      // id but ship to a different postal code are kept as distinct orders
+      // downstream, because the id was almost certainly mis-read by OCR on one of
+      // them. We use the delivery postal code alone: it is OCR-reliable, whereas
+      // the buyer-name text bleeds into adjacent labels ("… Nom du vendeur")
+      // and would produce false mismatches. `\b\d{5}\b` picks the postal code
+      // without matching the 3-/7-digit groups of the order number.
       const postal = (block.match(/\b\d{5}\b/) || [''])[0]
-      const buyerMatch = block.match(
-        /Nom de l['']acheteur\s*:?\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .-]{1,30})/i
-      )
-      const buyer = buyerMatch ? buyerMatch[1].trim() : ''
-      const shipAddress =
-        postal || buyer ? `${postal} ${buyer}`.replace(/\s+/g, ' ').trim().toUpperCase() : undefined
+      const shipAddress = postal || undefined
 
       orders.push({
         id: id.trim(),
